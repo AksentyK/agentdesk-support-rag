@@ -1,0 +1,103 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+}
+model Document {
+  id String @id @default(uuid())
+  name String @unique
+  createdAt DateTime @default(now())
+  versions DocumentVersion[]
+}
+model DocumentVersion {
+  id String @id @default(uuid())
+  documentId String
+  document Document @relation(fields:[documentId],references:[id],onDelete:Cascade)
+  checksum String
+  text String
+  active Boolean @default(true)
+  createdAt DateTime @default(now())
+  chunks Chunk[]
+  @@unique([documentId,checksum])
+}
+model Chunk {
+  id String @id @default(uuid())
+  versionId String
+  version DocumentVersion @relation(fields:[versionId],references:[id],onDelete:Cascade)
+  articleId String
+  title String
+  section String
+  content String
+  index Int
+  checksum String
+  embedding Unsupported("vector(256)")?
+  embeddingHash String
+  @@index([versionId])
+}
+model ChatSession {
+  id String @id @default(uuid())
+  owner String
+  createdAt DateTime @default(now())
+  messages Message[]
+}
+model Message {
+  id String @id @default(uuid())
+  sessionId String
+  session ChatSession @relation(fields:[sessionId],references:[id],onDelete:Cascade)
+  role String
+  content String
+  diagnostics Json?
+  createdAt DateTime @default(now())
+}
+model ModelConfig {
+  id String @id @default("default")
+  value Json
+  updatedAt DateTime @updatedAt
+}
+model EvaluationCase {
+  id String @id
+  question String
+  referenceAnswer String
+  sourceId String
+  category String
+  expectedAction String
+  split String
+}
+model EvaluationRun {
+  id String @id @default(uuid())
+  owner String
+  status String @default("running")
+  split String
+  kind String
+  snapshot Json
+  indexHash String
+  datasetHash String
+  completed Int @default(0)
+  total Int
+  cancelled Boolean @default(false)
+  createdAt DateTime @default(now())
+  results EvaluationResult[]
+}
+model EvaluationResult {
+  id String @id @default(uuid())
+  runId String
+  run EvaluationRun @relation(fields:[runId],references:[id],onDelete:Cascade)
+  caseId String
+  mode String
+  status String
+  result Json
+  manualScore Int?
+  createdAt DateTime @default(now())
+  @@unique([runId,caseId,mode])
+}
+model PricingSnapshot {
+  id String @id @default(uuid())
+  value Json
+  createdAt DateTime @default(now())
+}
+model RateLimit {
+  id String @id
+  count Int
+  expiresAt DateTime
+}
