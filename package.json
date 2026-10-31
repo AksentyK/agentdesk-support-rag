@@ -1,0 +1,55 @@
+{
+  "name": "agentdesk-support-rag-lab",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0",
+    "build": "npm run db:generate && next build --webpack",
+    "start": "next start --hostname 0.0.0.0",
+    "typecheck": "tsc --noEmit",
+    "test": "node --env-file-if-exists=.env.local --import tsx --test tests/*.test.ts",
+    "db:migrate": "node --env-file-if-exists=.env.local --import tsx scripts/migrate.ts",
+    "db:seed": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts",
+    "test:retrieval": "node --env-file-if-exists=.env.local --import tsx scripts/retrieval.ts",
+    "postinstall": "node scripts/generate.mjs",
+    "db:generate": "node scripts/generate.mjs",
+    "worker": "node --env-file-if-exists=.env.local --import tsx scripts/worker.ts",
+    "start:railway": "node --env-file-if-exists=.env.local scripts/start.mjs",
+    "test:e2e": "playwright test",
+    "test:retrieval:db": "node --env-file-if-exists=.env.local --import tsx scripts/evaluate-retrieval.ts"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "7.10.1",
+    "@prisma/client": "7.10.1",
+    "@prisma/client-generator-js": "7.10.1",
+    "@prisma/internals": "7.10.1",
+    "mammoth": "1.13.0",
+    "ml-matrix": "6.15.1",
+    "next": "16.4.3",
+    "openai": "7.45.1",
+    "pdf-parse": "2.4.5",
+    "pg": "8.23.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "recharts": "3.10.1",
+    "snowball-stemmers": "0.6.0",
+    "tsx": "4.23.15",
+    "undici": "8.12.3",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "26.6.6",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "prettier": "3.9.10",
+    "prisma": "7.10.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
+}

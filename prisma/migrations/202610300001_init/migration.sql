@@ -1,0 +1,16 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE "Document" (id text PRIMARY KEY, name text NOT NULL UNIQUE, "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE "DocumentVersion" (id text PRIMARY KEY, "documentId" text NOT NULL REFERENCES "Document"(id) ON DELETE CASCADE, checksum text NOT NULL, text text NOT NULL, active boolean NOT NULL DEFAULT true, "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE("documentId",checksum));
+CREATE TABLE "Chunk" (id text PRIMARY KEY, "versionId" text NOT NULL REFERENCES "DocumentVersion"(id) ON DELETE CASCADE, "articleId" text NOT NULL, title text NOT NULL, section text NOT NULL, content text NOT NULL, index integer NOT NULL, checksum text NOT NULL, embedding vector(256), "embeddingHash" text NOT NULL);
+CREATE INDEX "Chunk_versionId_idx" ON "Chunk"("versionId");
+CREATE INDEX "Chunk_embedding_idx" ON "Chunk" USING hnsw(embedding vector_cosine_ops);
+CREATE INDEX "Chunk_fts_idx" ON "Chunk" USING gin(to_tsvector('russian',content));
+CREATE TABLE "ChatSession" (id text PRIMARY KEY, owner text NOT NULL, "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE "Message" (id text PRIMARY KEY, "sessionId" text NOT NULL REFERENCES "ChatSession"(id) ON DELETE CASCADE, role text NOT NULL, content text NOT NULL, diagnostics jsonb, "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX "Message_session_idx" ON "Message"("sessionId","createdAt");
+CREATE TABLE "ModelConfig" (id text PRIMARY KEY DEFAULT 'default', value jsonb NOT NULL, "updatedAt" timestamp(3) NOT NULL);
+CREATE TABLE "EvaluationCase" (id text PRIMARY KEY, question text NOT NULL, "referenceAnswer" text NOT NULL, "sourceId" text NOT NULL, category text NOT NULL, "expectedAction" text NOT NULL, split text NOT NULL);
+CREATE TABLE "EvaluationRun" (id text PRIMARY KEY, owner text NOT NULL, status text NOT NULL DEFAULT 'running', split text NOT NULL, kind text NOT NULL, snapshot jsonb NOT NULL, "indexHash" text NOT NULL, "datasetHash" text NOT NULL, completed integer NOT NULL DEFAULT 0, total integer NOT NULL, cancelled boolean NOT NULL DEFAULT false, "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE "EvaluationResult" (id text PRIMARY KEY, "runId" text NOT NULL REFERENCES "EvaluationRun"(id) ON DELETE CASCADE, "caseId" text NOT NULL, mode text NOT NULL, status text NOT NULL, result jsonb NOT NULL, "manualScore" integer CHECK("manualScore" IN (0,1)), "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE("runId","caseId",mode));
+CREATE TABLE "PricingSnapshot" (id text PRIMARY KEY, value jsonb NOT NULL, "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE "RateLimit" (id text PRIMARY KEY, count integer NOT NULL, "expiresAt" timestamp(3) NOT NULL);

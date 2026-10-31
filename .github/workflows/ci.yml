@@ -1,0 +1,37 @@
+name: Validate RAG Lab
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: agentdesk
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: agentdesk_rag
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agentdesk -d agentdesk_rag"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://agentdesk:ci-only-password@localhost:5432/agentdesk_rag
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run db:migrate && npm run db:seed
+      - run: npm run typecheck && npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

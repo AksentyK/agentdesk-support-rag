@@ -1,0 +1,18 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: agentdesk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your shell}
+      POSTGRES_DB: agentdesk_rag
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - agentdesk_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentdesk -d agentdesk_rag"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  agentdesk_pg:
