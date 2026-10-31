@@ -89,6 +89,29 @@ Integration/e2e требуют **отдельную тестовую БД**, м�
 
 ## Railway
 
+### Existing project `acceptable-blessing` / `production`
+
+Use the existing `agentdesk-web` service from branch `feat/agentdesk-rag-lab` and the existing `agentdesk-db` service from `pgvector/pgvector:pg17`. The database volume must remain mounted at `/var/lib/postgresql/data` (PostgreSQL 17). Do not create another project or database service. The image will repeatedly restart on an empty volume until `POSTGRES_PASSWORD` is set.
+
+Configure these Railway variables in the service settings; enter secret values only in Railway, never in Git:
+
+| Service | Variable | Value |
+| --- | --- | --- |
+| `agentdesk-db` | `POSTGRES_USER` | `agentdesk` |
+| `agentdesk-db` | `POSTGRES_DB` | `agentdesk_rag` |
+| `agentdesk-db` | `POSTGRES_PASSWORD` | New strong random URL-safe secret, such as 32 random hexadecimal bytes, generated and stored in Railway |
+| `agentdesk-web` | `DATABASE_URL` | `postgresql://agentdesk:${{agentdesk-db.POSTGRES_PASSWORD}}@${{agentdesk-db.RAILWAY_PRIVATE_DOMAIN}}:5432/agentdesk_rag` using Railway reference variables; if the password contains reserved URL characters, URL-encode it instead |
+| `agentdesk-web` | `DEMO_ACCESS_PASSWORD` | Separate strong client-facing password |
+| `agentdesk-web` | `BASELINE_MODEL_ID` | Model ID confirmed in the RouterAI account |
+| `agentdesk-web` | `STRONG_MODEL_ID` | Second confirmed model ID |
+| `agentdesk-web` | `ROUTERAI_API_KEY` | RouterAI key; required only for real LLM calls |
+| `agentdesk-web` | `ROUTERAI_BASE_URL` | `https://routerai.ru/api/v1` |
+| `agentdesk-web` | `APP_ORIGIN` | Final `https://...up.railway.app` origin after creating a public domain; optional before that |
+
+Railway's private-domain and secret reference syntax should be checked in the variable editor before saving `DATABASE_URL`. An alternative is to set `DATABASE_URL` to a Railway-provided database connection reference if it targets the `agentdesk-db` service and includes the intended database name. Never use `POSTGRES_HOST_AUTH_METHOD=trust` for this demo. No database public domain or TCP proxy is required.
+
+The committed `railway.json` requests `npm ci && npm run build`, then runs `npm run db:migrate && npm run db:seed` as the pre-deploy command, and starts both the web process and evaluation worker with `npm run start:railway`. Verify these commands in the service settings if Railway does not pick up the config file. Once the DB reports a healthy start and the web deployment succeeds, create a public HTTPS domain for `agentdesk-web` and set `APP_ORIGIN` to its exact origin. Check `/api/health`: `app=ok`, `database=true`, `indexed=true`; `routerKeyConfigured` reports only key presence. Then test login, offline search for AD-413 and the Team limit, and one authorized real chat request for each configured model. Four-mode paid evaluations require a separate approved request limit.
+
 1. Подключите репозиторий и этот PR после проверки. Приложение и PostgreSQL должны быть отдельными сервисами. Подключите persistent volume PostgreSQL; не используйте эфемерную БД.
 2. Выберите PostgreSQL с pgvector. Задайте приложению приватный `DATABASE_URL`, пароль демо и при необходимости ключ/ID RouterAI. Для внешней БД используйте её корректный TLS/CA, не `rejectUnauthorized:false`.
 3. `railway.json` задаёт сборку, pre-deploy миграции + идемпотентный импорт, старт приложения и worker, health endpoint. Node 24 закреплён в `engines`. `PORT` подставляется Railway. Одна реплика.
