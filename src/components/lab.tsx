@@ -51,13 +51,17 @@ async function api<T = Record<string, unknown>>(
   const response = await fetch("/api/" + path, {
     method: method || (body ? "POST" : "GET"),
     headers:
-      body instanceof FormData
+      body instanceof FormData || body instanceof Blob
         ? {}
         : body
           ? { "Content-Type": "application/json" }
           : {},
     body:
-      body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+      body instanceof FormData || body instanceof Blob
+        ? body
+        : body
+          ? JSON.stringify(body)
+          : undefined,
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Операция не выполнена");
@@ -494,9 +498,29 @@ export default function Lab() {
                       const file = e.target.files?.[0];
                       if (file)
                         void perform(async () => {
-                          const form = new FormData();
-                          form.set("file", file);
-                          await api("documents", form);
+                          if (file.size > 20 * 1024 * 1024 || !file.size)
+                            throw new Error(
+                              "Размер файла должен быть от 1 байта до 20 МБ.",
+                            );
+                          const upload = await api<{ id: string }>(
+                            "documents/uploads",
+                            { name: file.name, size: file.size },
+                          );
+                          const partSize = 3 * 1024 * 1024;
+                          for (
+                            let offset = 0, index = 0;
+                            offset < file.size;
+                            offset += partSize, index++
+                          )
+                            await api(
+                              `documents/uploads/${upload.id}/${index}`,
+                              file.slice(offset, offset + partSize),
+                              "PUT",
+                            );
+                          await api(
+                            `documents/uploads/${upload.id}/complete`,
+                            {},
+                          );
                           await refreshDocs();
                         });
                       e.target.value = "";

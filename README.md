@@ -2,6 +2,10 @@
 
 Русскоязычный MVP AI-поддержки для **вымышленного** AgentDesk. Next.js 16 / React 19 / TypeScript / Tailwind CSS 4, PostgreSQL 17 + pgvector, Prisma 7 с JavaScript PostgreSQL-адаптером, серверный OpenAI SDK для RouterAI. Зависимости зафиксированы в `package-lock.json`; Node.js 24 LTS.
 
+## Подготовка переноса на Vercel + Neon
+
+Ветка `feat/vercel-migration`: [аудит, архитектура worker, настройка preview, перенос данных и откат](docs/VERCEL_MIGRATION.md). На Vercel пакетные тесты выполняет Workflow; локальный/Railway worker сохранён. Загрузка до 20 МБ передаётся частями через PostgreSQL. Миграции и seed не запускаются во время Vercel build. Действующий Railway этим изменением не переключается.
+
 ## Что реализовано
 
 - Чат с историей сессии, экономичной/сильной моделью и переключателем RAG. Четыре режима используют одинаковые настройки генерации. Параметры и цены сохраняются в БД; model ID проверяются по `/models` перед сохранением и реальным вызовом. Недоступная модель не заменяется автоматически.
@@ -70,14 +74,16 @@ npm run start:railway
 
 ```sh
 npm run typecheck
-npm test                    # без DATABASE_URL: 12 unit, 2 integration skipped
+npm test                    # без DATABASE_URL: 13 unit, 4 integration skipped
 npm run test:retrieval       # только 48 dev; без ключа и без БД
 npm run test:retrieval:db    # все 60, с сохранением результатов в отдельную тестовую БД
 # С работающей БД и DATABASE_URL:
 npm run db:migrate
 npm run db:seed
-npm test                    # 14 проверок, включая реальную pgvector БД и mock RouterAI
+npm test                    # 17 проверок, включая реальную pgvector БД и mock RouterAI
 npm run build
+npm run test:bundle          # PDF/DOCX из изолированного пакета после build
+E2E_EXECUTOR=workflow npm run test:e2e # без отдельного worker
 npm run test:e2e             # Chromium: пароль, поиск, документы, worker, мобильный интерфейс
 ```
 

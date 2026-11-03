@@ -16,7 +16,9 @@
     "worker": "node --env-file-if-exists=.env.local --import tsx scripts/worker.ts",
     "start:railway": "node --env-file-if-exists=.env.local scripts/start.mjs",
     "test:e2e": "playwright test",
-    "test:retrieval:db": "node --env-file-if-exists=.env.local --import tsx scripts/evaluate-retrieval.ts"
+    "test:retrieval:db": "node --env-file-if-exists=.env.local --import tsx scripts/evaluate-retrieval.ts",
+    "db:verify-migration": "node --env-file-if-exists=.env.local --import tsx scripts/verify-migration.ts",
+    "test:bundle": "node scripts/check-vercel-bundle.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.10.1",
@@ -35,6 +37,7 @@
     "snowball-stemmers": "0.6.0",
     "tsx": "4.23.15",
     "undici": "8.12.3",
+    "workflow": "5.3.0",
     "zod": "4.6.7"
   },
   "devDependencies": {

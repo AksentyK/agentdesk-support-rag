@@ -9,6 +9,8 @@ process.on("SIGINT", () => {
   stopping = true;
 });
 async function main() {
+  if (process.env.EVALUATION_EXECUTOR === "workflow" || process.env.VERCEL)
+    throw new Error("Standalone worker is disabled in workflow mode");
   // One Railway replica: PostgreSQL advisory lock prevents competing workers.
   const pg = await import("pg");
   const lock = new pg.Client({ connectionString: process.env.DATABASE_URL });
@@ -19,13 +21,13 @@ async function main() {
   if (!claimed.rows[0].locked)
     throw new Error("An evaluation worker is already running");
   await db().evaluationRun.updateMany({
-    where: { status: "running" },
+    where: { status: "running", executor: "worker" },
     data: { status: "interrupted" },
   });
   console.log("Evaluation worker ready");
   while (!stopping) {
     const run = await db().evaluationRun.findFirst({
-      where: { status: "queued" },
+      where: { status: "queued", executor: "worker" },
       orderBy: { createdAt: "asc" },
     });
     if (run) {

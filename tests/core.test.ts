@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -143,4 +144,15 @@ test("quality is never fabricated from retrieval/citation scores", async () => {
   });
   assert.equal(m.factualAccuracy, null);
   assert.equal(m.reviewRequired, true);
+});
+
+test("real PDF and DOCX parsers extract text in the Node runtime", async () => {
+  const pdf = await extract(
+    new File([await readFile("AgentDesk_Manual_35pages.pdf")], "manual.pdf"),
+  );
+  assert(pdf.text.includes("AgentDesk"));
+  const docx = await extract(
+    new File([await readFile("tests/fixtures/sample.docx")], "sample.docx"),
+  );
+  assert(docx.text.includes("AgentDesk: проверка DOCX."));
 });

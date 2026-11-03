@@ -21,10 +21,23 @@ import {
 } from "@/lib/retrieval";
 import { extract } from "@/lib/documents";
 import { dataset } from "@/lib/dataset";
+import { start } from "workflow/api";
+import { evaluationWorkflow } from "@/workflows/evaluation";
+import {
+  reconcileStaleRuns,
+  interruptWorkflowRun,
+} from "@/lib/evaluation-batches";
+import {
+  beginUpload,
+  putUploadPart,
+  finishUpload,
+  UPLOAD_PART_SIZE,
+} from "@/lib/uploads";
 import { createRun, csv } from "@/lib/evaluation";
 import { modelReadiness, checkStartupModels } from "@/lib/readiness";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 const json = (data: unknown, status = 200) =>
   NextResponse.json(data, { status, headers: { "Cache-Control": "no-store" } });
 async function bounded(req: NextRequest, max: number) {
@@ -142,6 +155,24 @@ async function handler(req: NextRequest) {
           : "Production заблокирован: задайте DEMO_ACCESS_PASSWORD.",
       );
     if (method !== "GET") await rateLimit("mutations:" + owner, 60);
+    if (path.startsWith("evaluation/") || path.startsWith("documents"))
+      await reconcileStaleRuns();
+    if (path === "documents/uploads" && method === "POST")
+      return json(await beginUpload(owner, await body(req)), 201);
+    const uploadMatch = path.match(
+      /^documents\/uploads\/([^/]+)\/(\d+|complete)$/,
+    );
+    if (uploadMatch && method === "PUT" && uploadMatch[2] !== "complete") {
+      await putUploadPart(
+        uploadMatch[1],
+        owner,
+        Number(uploadMatch[2]),
+        await bounded(req, UPLOAD_PART_SIZE),
+      );
+      return json({ ok: true });
+    }
+    if (uploadMatch && method === "POST" && uploadMatch[2] === "complete")
+      return json(await finishUpload(uploadMatch[1], owner));
     if (path === "settings" && method === "GET")
       return json({
         settings: await settings(),
@@ -237,7 +268,12 @@ async function handler(req: NextRequest) {
           include: {
             versions: {
               where: { active: true },
-              include: { _count: { select: { chunks: true } } },
+              select: {
+                id: true,
+                checksum: true,
+                createdAt: true,
+                _count: { select: { chunks: true } },
+              },
             },
           },
           orderBy: { createdAt: "desc" },
@@ -350,7 +386,21 @@ async function handler(req: NextRequest) {
         data.maxRequests,
         data.retryId,
       );
-      const { snapshot, ...safe } = created;
+      if (created.executor === "workflow") {
+        try {
+          await start(evaluationWorkflow, [created.id]);
+        } catch {
+          // An ambiguous dispatch is stopped; a new, explicitly confirmed run can retry.
+          await interruptWorkflowRun(created.id);
+          throw new AppError(
+            503,
+            "Не удалось запустить тест. Проверьте историю и повторите запуск.",
+          );
+        }
+      }
+      const { snapshot, leaseToken, leaseExpiresAt, ...safe } = created;
+      void leaseToken;
+      void leaseExpiresAt;
       void snapshot;
       return json(safe, 201);
     }
@@ -409,7 +459,9 @@ async function handler(req: NextRequest) {
           },
         );
       // Reference answers remain server-side; completed holdout results can be reviewed, never inserted in prompts.
-      const { snapshot, ...safe } = run;
+      const { snapshot, leaseToken, leaseExpiresAt, ...safe } = run;
+      void leaseToken;
+      void leaseExpiresAt;
       void snapshot;
       const references = ["completed", "completed-with-errors"].includes(
         run.status,

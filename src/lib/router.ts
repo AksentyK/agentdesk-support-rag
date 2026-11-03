@@ -35,7 +35,7 @@ export function client() {
     apiKey: process.env.ROUTERAI_API_KEY,
     baseURL,
     timeout: Math.min(
-      120000,
+      process.env.VERCEL ? 90000 : 120000,
       Math.max(1000, Number(process.env.REQUEST_TIMEOUT_MS || 60000)),
     ),
     maxRetries: 0,

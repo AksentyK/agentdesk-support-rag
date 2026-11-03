@@ -40,7 +40,7 @@ test("password, Russian UI, offline retrieval, document upload and persistent ev
     name: "e2e-note.txt",
     mimeType: "text/plain",
     buffer: Buffer.from(
-      "Документ для проверки загрузки и версий. Содержимое тестовое.",
+      "Документ для проверки загрузки и версий. " + "文".repeat(1700000),
     ),
   });
   await expect(
@@ -94,4 +94,51 @@ test("mobile tabs keep search and source inspection usable", async ({
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+});
+
+test("workflow completes all 60 retrieval questions after the browser tab is closed", async ({
+  page,
+}) => {
+  test.skip(
+    process.env.E2E_EXECUTOR !== "workflow",
+    "Workflow-specific background execution",
+  );
+  const context = page.context();
+  await context.request.post("/api/auth/login", {
+    data: { password: process.env.TEST_DEMO_PASSWORD },
+  });
+  await page.goto("/");
+  const response = await context.request.post("/api/evaluation/runs", {
+    data: { kind: "retrieval", split: "all", maxRequests: 0 },
+  });
+  expect(response.status()).toBe(201);
+  const created = await response.json();
+  expect(created.executor).toBe("workflow");
+  await page.close();
+  await expect
+    .poll(
+      async () =>
+        (
+          await (
+            await context.request.get(`/api/evaluation/runs/${created.id}`)
+          ).json()
+        ).status,
+      { timeout: 45000, intervals: [1500] },
+    )
+    .toBe("completed");
+  const run = await (
+    await context.request.get(`/api/evaluation/runs/${created.id}`)
+  ).json();
+  expect(run.completed).toBe(60);
+  expect(run.results).toHaveLength(60);
+  expect(run.references).toHaveLength(60);
+  expect(run.snapshot).toBeUndefined();
+  expect(run.leaseToken).toBeUndefined();
+  const reopened = await context.newPage();
+  await reopened.goto("/");
+  await expect(
+    reopened.getByRole("heading", {
+      name: "Точные ответы начинаются со знаний.",
+    }),
+  ).toBeVisible();
 });
