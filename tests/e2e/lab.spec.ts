@@ -96,6 +96,153 @@ test("mobile tabs keep search and source inspection usable", async ({
   ).toBe(true);
 });
 
+test("chat exposes real API diagnostics tabs for all four comparison modes", async ({
+  page,
+}) => {
+  const source = {
+    id: "chunk-ad413",
+    articleId: "AD-KB-09.03",
+    title: "Ошибки документов",
+    section: "AD-413",
+    content: "AD-413: файл больше предела тарифа.",
+    filename: "AgentDesk_Knowledge.md",
+    version: "version-checksum",
+    index: 3,
+    checksum: "chunk-checksum",
+    score: 0.8,
+    vectorScore: 0.872,
+    bm25Score: 5.424,
+    vectorRank: 1,
+    bm25Rank: 1,
+    position: 1,
+  };
+  await page.route("**/api/auth/status", (route) =>
+    route.fulfill({ json: { authenticated: true } }),
+  );
+  await page.route("**/api/settings", (route) =>
+    route.fulfill({
+      json: {
+        settings: {
+          baseline: "test/baseline",
+          strong: "test/strong",
+          topK: 5,
+          threshold: 0.18,
+          semanticWeight: 0.65,
+          temperature: 0.2,
+          maxTokens: 800,
+          currency: "RUB",
+          baselineInput: null,
+          baselineOutput: null,
+          strongInput: null,
+          strongOutput: null,
+          pricingDate: "",
+        },
+        keyConfigured: true,
+        databaseConfigured: true,
+      },
+    }),
+  );
+  await page.route("**/api/articles", (route) =>
+    route.fulfill({ json: { articles: [] } }),
+  );
+  await page.route("**/api/evaluation/cases", (route) =>
+    route.fulfill({ json: { cases: [] } }),
+  );
+  await page.route("**/api/documents", (route) =>
+    route.fulfill({ json: { documents: [] } }),
+  );
+  await page.route("**/api/evaluation/runs", (route) =>
+    route.fulfill({ json: { runs: [] } }),
+  );
+  await page.route("**/api/chat", async (route) => {
+    const request = route.request().postDataJSON() as {
+      role: "baseline" | "strong";
+      rag: boolean;
+    };
+    const rag = request.rag;
+    await route.fulfill({
+      json: {
+        answer: "Результат проверки.",
+        model: request.role,
+        mode: `${request.role}-${rag ? "rag" : "plain"}`,
+        sources: rag ? [source] : [],
+        retrieval: {
+          vectorResults: rag ? [source] : [],
+          bm25Results: rag ? [source] : [],
+          overlapIds: rag ? [source.id] : [],
+        },
+        llmContext: rag
+          ? [
+              {
+                id: source.id,
+                articleId: source.articleId,
+                title: source.title,
+                section: source.section,
+                content: source.content,
+                position: 1,
+              },
+            ]
+          : [],
+        citations: rag ? [source.articleId] : [],
+        invalidCitations: [],
+        latencyMs: 10,
+        usage: null,
+        cost: null,
+        currency: "RUB",
+        indexHash: rag ? "test-index" : "without-rag",
+        status: "ok",
+        pricingSnapshot: {},
+        sessionId: "test-session",
+      },
+    });
+  });
+
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Точные ответы начинаются со знаний." }),
+  ).toBeVisible();
+  const ragToggle = page.getByRole("checkbox", { name: "RAG включён" });
+  for (const role of ["baseline", "strong"] as const) {
+    await page.getByLabel("Модель").selectOption(role);
+    for (const rag of [true, false]) {
+      if ((await ragToggle.isChecked()) !== rag)
+        await ragToggle.setChecked(rag);
+      await page
+        .getByLabel("Ваш вопрос")
+        .fill(`${role} ${rag ? "RAG" : "plain"}`);
+      await page.getByRole("button", { name: "Отправить →" }).click();
+      const diagnostic = page.getByTestId("rag-diagnostics").last();
+      await expect(diagnostic).toBeVisible();
+      await diagnostic.locator("summary").click();
+      await expect(diagnostic.getByTestId("rag-tab-vector")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      if (rag) {
+        await expect(diagnostic).toContainText("Векторный поиск (1)");
+        await expect(diagnostic).toContainText("BM25 (1)");
+        await expect(diagnostic).toContainText("Контекст LLM (1)");
+        await expect(diagnostic).toContainText("Найдены обоими методами");
+        await diagnostic.getByTestId("rag-tab-bm25").click();
+        await expect(
+          diagnostic.getByTestId("rag-diagnostic-panel"),
+        ).toContainText("BM25 5.424");
+        await diagnostic.getByTestId("rag-tab-context").click();
+        await expect(
+          diagnostic.getByTestId("rag-diagnostic-panel"),
+        ).toContainText("ID фрагмента: chunk-ad413");
+      } else {
+        await expect(diagnostic).toContainText("Векторный поиск (0)");
+        await expect(diagnostic).toContainText("BM25 (0)");
+        await expect(diagnostic).toContainText("Контекст LLM (0)");
+        await expect(diagnostic.getByTestId("rag-disabled")).toHaveText(
+          "Поиск по базе знаний отключён.",
+        );
+      }
+    }
+  }
+});
+
 test("workflow completes all 60 retrieval questions after the browser tab is closed", async ({
   page,
 }) => {

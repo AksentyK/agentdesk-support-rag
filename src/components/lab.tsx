@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   BarChart,
   Bar,
@@ -192,6 +192,7 @@ export default function Lab() {
       { role: string; text: string; result?: Answer }[]
     >([]),
     [models, setModels] = useState<string[]>([]);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const [ragDiagnosticTab, setRagDiagnosticTab] = useState<
     "vector" | "bm25" | "context"
   >("context");
@@ -256,6 +257,12 @@ export default function Lab() {
     }, 1800);
     return () => clearInterval(timer);
   }, [run?.id, run?.status]);
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      block: "end",
+      behavior: "smooth",
+    });
+  }, [messages.length]);
   async function send(e: FormEvent) {
     e.preventDefault();
     if (!question.trim()) return;
@@ -681,7 +688,7 @@ export default function Lab() {
                   </div>
                 </div>
               ) : (
-                <div className="messages">
+                <div className="messages" data-testid="chat-messages">
                   {messages.map((m, i) => (
                     <article key={i} className={"message " + m.role}>
                       <small>{m.role === "user" ? "Вы" : "AI-оператор"}</small>
@@ -749,14 +756,22 @@ export default function Lab() {
                                 Проверьте сведения перед использованием.
                               </div>
                             )}
-                          <details className="source rag-diagnostics">
+                          <details
+                            className="source rag-diagnostics"
+                            data-testid="rag-diagnostics"
+                          >
                             <summary>
                               <strong>Диагностика RAG</strong> · Векторный поиск
                               ({m.result.retrieval.vectorResults.length}) · BM25
                               ({m.result.retrieval.bm25Results.length}) ·
                               Контекст LLM ({m.result.llmContext.length})
                             </summary>
-                            <div className="row" style={{ margin: "10px 0" }}>
+                            <div
+                              className="row rag-diagnostic-tabs"
+                              role="tablist"
+                              aria-label="Вкладки диагностики RAG"
+                              style={{ margin: "10px 0" }}
+                            >
                               {(
                                 [
                                   ["vector", "Векторный поиск"],
@@ -767,8 +782,13 @@ export default function Lab() {
                                 <button
                                   key={key}
                                   type="button"
+                                  role="tab"
+                                  id={`rag-${i}-${key}-tab`}
+                                  aria-controls={`rag-${i}-panel`}
                                   onClick={() => setRagDiagnosticTab(key)}
+                                  aria-selected={ragDiagnosticTab === key}
                                   aria-pressed={ragDiagnosticTab === key}
+                                  data-testid={`rag-tab-${key}`}
                                 >
                                   {label}
                                 </button>
@@ -786,25 +806,35 @@ export default function Lab() {
                                   .join(", ")}
                               </p>
                             )}
-                            {m.result.mode.endsWith("-plain") ? (
-                              <p>Поиск по базе знаний отключён.</p>
-                            ) : (
-                              <Sources
-                                idPrefix={`message-${i}`}
-                                sources={
-                                  ragDiagnosticTab === "vector"
-                                    ? m.result.retrieval.vectorResults
-                                    : ragDiagnosticTab === "bm25"
-                                      ? m.result.retrieval.bm25Results
-                                      : m.result.llmContext
-                                }
-                              />
-                            )}
+                            <div
+                              role="tabpanel"
+                              id={`rag-${i}-panel`}
+                              aria-labelledby={`rag-${i}-${ragDiagnosticTab}-tab`}
+                              data-testid="rag-diagnostic-panel"
+                            >
+                              {m.result.mode.endsWith("-plain") ? (
+                                <p data-testid="rag-disabled">
+                                  Поиск по базе знаний отключён.
+                                </p>
+                              ) : (
+                                <Sources
+                                  idPrefix={`message-${i}`}
+                                  sources={
+                                    ragDiagnosticTab === "vector"
+                                      ? m.result.retrieval.vectorResults
+                                      : ragDiagnosticTab === "bm25"
+                                        ? m.result.retrieval.bm25Results
+                                        : m.result.llmContext
+                                  }
+                                />
+                              )}
+                            </div>
                           </details>
                         </>
                       )}
                     </article>
                   ))}
+                  <div ref={messagesEndRef} aria-hidden="true" />
                 </div>
               )}
               <form className="composer" onSubmit={send}>
