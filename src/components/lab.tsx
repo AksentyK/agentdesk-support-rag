@@ -9,7 +9,7 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
-import type { Answer, Settings, Source } from "@/lib/types";
+import type { Answer, ContextFragment, Settings, Source } from "@/lib/types";
 type Doc = {
   id: string;
   name: string;
@@ -69,22 +69,102 @@ async function api<T = Record<string, unknown>>(
 }
 const money = (value: number | null | undefined, currency = "RUB") =>
   value == null ? "не рассчитано" : `${value.toFixed(5)} ${currency} (оценка)`;
-function Sources({ sources }: { sources: Source[] }) {
+function Sources({
+  sources,
+  idPrefix = "src",
+}: {
+  sources: (Source | ContextFragment)[];
+  idPrefix?: string;
+}) {
   return (
     <>
       {sources.map((s) => (
-        <details className="source" key={s.id}>
+        <details
+          className="source"
+          key={s.id}
+          id={`${idPrefix}-source-${s.id}`}
+        >
           <summary>
-            <strong>{s.articleId}</strong> · {Math.round(s.score * 100)}%<br />
+            <strong>{s.articleId}</strong> · позиция {s.position ?? "—"}
+            {"vectorScore" in s &&
+              s.vectorScore != null &&
+              ` · similarity ${s.vectorScore.toFixed(3)}`}
+            {"bm25Score" in s &&
+              s.bm25Score != null &&
+              ` · BM25 ${s.bm25Score.toFixed(3)}`}
+            <br />
             {s.title}
           </summary>
           <p>{s.content}</p>
           <small>
-            {s.filename} · версия {s.version.slice(0, 12)} · чанк {s.index}
+            {"filename" in s
+              ? `${s.filename} · версия ${s.version.slice(0, 12)} · чанк ${s.index}`
+              : `Раздел: ${s.section} · ID фрагмента: ${s.id}`}
           </small>
         </details>
       ))}
     </>
+  );
+}
+function Markdown({
+  text,
+  sources,
+  idPrefix,
+  onSource,
+}: {
+  text: string;
+  sources: Source[];
+  idPrefix: string;
+  onSource: (source: Source) => void;
+}) {
+  const allowed = new Set(sources.map((s) => s.articleId));
+  const inline = (line: string, key: string) => {
+    const parts = line.split(
+      /(\*\*[^*]+\*\*|(?:AD-KB-\d{2}\.\d{2}|DOC-[a-f0-9]{12}))/g,
+    );
+    return parts.map((part, i) => {
+      if (/^\*\*[^*]+\*\*$/.test(part))
+        return <strong key={i}>{part.slice(2, -2)}</strong>;
+      if (allowed.has(part)) {
+        const source = sources.find((s) => s.articleId === part)!;
+        return (
+          <a
+            key={i}
+            href="#knowledge-source"
+            onClick={(event) => {
+              event.preventDefault();
+              onSource(source);
+            }}
+          >
+            {part}
+          </a>
+        );
+      }
+      return <span key={i}>{part}</span>;
+    });
+  };
+  const lines = text.split("\n");
+  return (
+    <div className="markdown">
+      {lines.map((line, i) => {
+        const heading = /^(#{1,3})\s+(.*)$/.exec(line);
+        if (heading)
+          return heading[1].length === 1 ? (
+            <h3 key={i}>{inline(heading[2], `${i}`)}</h3>
+          ) : (
+            <h4 key={i}>{inline(heading[2], `${i}`)}</h4>
+          );
+        if (/^\s*[-*]\s+/.test(line))
+          return (
+            <div key={i}>
+              • {inline(line.replace(/^\s*[-*]\s+/, ""), `${i}`)}
+            </div>
+          );
+        if (/^\s*\d+[.)]\s+/.test(line))
+          return <div key={i}>{inline(line.trim(), `${i}`)}</div>;
+        return line ? <p key={i}>{inline(line, `${i}`)}</p> : <br key={i} />;
+      })}
+    </div>
   );
 }
 export default function Lab() {
@@ -112,6 +192,9 @@ export default function Lab() {
       { role: string; text: string; result?: Answer }[]
     >([]),
     [models, setModels] = useState<string[]>([]);
+  const [ragDiagnosticTab, setRagDiagnosticTab] = useState<
+    "vector" | "bm25" | "context"
+  >("context");
   const [runs, setRuns] = useState<Run[]>([]),
     [run, setRun] = useState<Run | null>(null),
     [split, setSplit] = useState("dev"),
@@ -602,7 +685,28 @@ export default function Lab() {
                   {messages.map((m, i) => (
                     <article key={i} className={"message " + m.role}>
                       <small>{m.role === "user" ? "Вы" : "AI-оператор"}</small>
-                      <p>{m.text}</p>
+                      {m.result ? (
+                        <Markdown
+                          text={m.text}
+                          sources={m.result.sources}
+                          idPrefix={`message-${i}`}
+                          onSource={(source) => {
+                            const article = articles.find(
+                              (a) => a.articleId === source.articleId,
+                            );
+                            if (article) {
+                              setSelected(article);
+                              setTab("knowledge");
+                              setMobile("knowledge");
+                            } else {
+                              setSources([source]);
+                              setMobile("diagnostics");
+                            }
+                          }}
+                        />
+                      ) : (
+                        <p>{m.text}</p>
+                      )}
                       {m.result && (
                         <>
                           <span className="badge">
@@ -630,6 +734,73 @@ export default function Lab() {
                               Диагностика ↗
                             </button>
                           </div>
+                          {m.result.invalidCitations.length > 0 && (
+                            <div className="notice">
+                              Ответ содержит неподтверждённые ссылки; они
+                              скрыты.
+                            </div>
+                          )}
+                          {rag &&
+                            m.result.mode.endsWith("-rag") &&
+                            !m.result.citations.length &&
+                            m.result.status === "ok" && (
+                              <div className="notice">
+                                В ответе нет ссылок на подтверждающие фрагменты.
+                                Проверьте сведения перед использованием.
+                              </div>
+                            )}
+                          <details className="source rag-diagnostics">
+                            <summary>
+                              <strong>Диагностика RAG</strong> · Векторный поиск
+                              ({m.result.retrieval.vectorResults.length}) · BM25
+                              ({m.result.retrieval.bm25Results.length}) ·
+                              Контекст LLM ({m.result.llmContext.length})
+                            </summary>
+                            <div className="row" style={{ margin: "10px 0" }}>
+                              {(
+                                [
+                                  ["vector", "Векторный поиск"],
+                                  ["bm25", "BM25"],
+                                  ["context", "Контекст LLM"],
+                                ] as const
+                              ).map(([key, label]) => (
+                                <button
+                                  key={key}
+                                  type="button"
+                                  onClick={() => setRagDiagnosticTab(key)}
+                                  aria-pressed={ragDiagnosticTab === key}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                            {m.result.retrieval.overlapIds.length > 0 && (
+                              <p className="muted">
+                                Найдены обоими методами:{" "}
+                                {m.result.retrieval.overlapIds
+                                  .map(
+                                    (id) =>
+                                      m.result!.sources.find((s) => s.id === id)
+                                        ?.articleId || id,
+                                  )
+                                  .join(", ")}
+                              </p>
+                            )}
+                            {m.result.mode.endsWith("-plain") ? (
+                              <p>Поиск по базе знаний отключён.</p>
+                            ) : (
+                              <Sources
+                                idPrefix={`message-${i}`}
+                                sources={
+                                  ragDiagnosticTab === "vector"
+                                    ? m.result.retrieval.vectorResults
+                                    : ragDiagnosticTab === "bm25"
+                                      ? m.result.retrieval.bm25Results
+                                      : m.result.llmContext
+                                }
+                              />
+                            )}
+                          </details>
                         </>
                       )}
                     </article>
@@ -785,7 +956,9 @@ export default function Lab() {
           <article className="panel padded">
             <span className="badge">Встроенный источник · версия 1.0</span>
             <h2 style={{ marginTop: 18 }}>{selected?.title}</h2>
-            <div className="articletext">{selected?.content}</div>
+            <div className="articletext" id="knowledge-source">
+              {selected?.content}
+            </div>
           </article>
         </div>
       )}

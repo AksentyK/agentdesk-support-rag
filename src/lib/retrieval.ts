@@ -3,7 +3,7 @@ import { db } from "./db";
 import { adapter, cosine, tokens } from "./embeddings";
 import { hash, chunkArticles, bundledKnowledge } from "./knowledge";
 import { AppError } from "./errors";
-import type { Settings, Source } from "./types";
+import type { RetrievalDiagnostics, Settings, Source } from "./types";
 type Row = {
   id: string;
   articleId: string;
@@ -46,6 +46,113 @@ export function rerank(
     .sort((a, b) => b.score - a.score)
     .slice(0, s.topK);
 }
+type HybridRow = Row & { semantic: number };
+/** Okapi BM25 over the active chunk corpus (k1=1.2, b=0.75). Scores are raw BM25. */
+export function bm25Rank(query: string, rows: Row[], limit = 40) {
+  const terms = [...new Set(tokens(query))];
+  const docs = rows.map((row) => tokens(row.content));
+  const lengths = docs.map((doc) => doc.length);
+  const avgLength = lengths.reduce((sum, n) => sum + n, 0) / (rows.length || 1);
+  const df = new Map<string, number>();
+  for (const doc of docs)
+    for (const term of new Set(doc)) df.set(term, (df.get(term) || 0) + 1);
+  const code = query.match(/\bAD-\d{3}\b/i)?.[0].toLowerCase();
+  return (
+    rows
+      .map((row, i) => {
+        const tf = new Map<string, number>();
+        for (const term of docs[i]) tf.set(term, (tf.get(term) || 0) + 1);
+        const score = terms.reduce((sum, term) => {
+          const count = tf.get(term) || 0;
+          if (!count) return sum;
+          const n = df.get(term) || 0;
+          const idf = Math.log(1 + (rows.length - n + 0.5) / (n + 0.5));
+          return (
+            sum +
+            (idf * (count * 2.2)) /
+              (count + 1.2 * (0.25 + (0.75 * lengths[i]) / (avgLength || 1)))
+          );
+        }, 0);
+        const exactCode =
+          !!code && row.content.toLowerCase().includes(code + ":");
+        return { ...row, bm25Score: score, exactCode };
+      })
+      // Ignore incidental one-token hits; retain exact technical-code matches.
+      .filter((row) => row.bm25Score >= 0.45 || row.exactCode)
+      .sort(
+        (a, b) =>
+          Number(b.exactCode) - Number(a.exactCode) ||
+          b.bm25Score - a.bm25Score,
+      )
+      .slice(0, limit)
+  );
+}
+export function hybridRank(query: string, rows: HybridRow[], s: Settings) {
+  const vectors = [...rows]
+    .sort((a, b) => b.semantic - a.semantic)
+    .filter((row) => row.semantic >= s.threshold)
+    .slice(0, 40);
+  const lexical = bm25Rank(query, rows);
+  const vectorMap = new Map(
+    vectors.map((row, i) => [row.id, { row, rank: i + 1 }]),
+  );
+  const lexicalMap = new Map(
+    lexical.map((row, i) => [row.id, { row, rank: i + 1 }]),
+  );
+  const toSource = (row: Row, extra: Partial<Source>): Source => ({
+    ...row,
+    score: 0,
+    vectorScore: null,
+    bm25Score: null,
+    vectorRank: null,
+    bm25Rank: null,
+    ...extra,
+  });
+  const vectorResults = vectors.map((row, i) =>
+    toSource(row, {
+      score: row.semantic,
+      vectorScore: row.semantic,
+      vectorRank: i + 1,
+      position: i + 1,
+    }),
+  );
+  const bm25Results = lexical.map((row, i) =>
+    toSource(row, {
+      score: row.bm25Score,
+      bm25Score: row.bm25Score,
+      bm25Rank: i + 1,
+      position: i + 1,
+    }),
+  );
+  const ids = new Set([...vectorMap.keys(), ...lexicalMap.keys()]);
+  const code = query.match(/\bAD-\d{3}\b/i)?.[0].toLowerCase();
+  const sources = [...ids]
+    .map((id) => {
+      const v = vectorMap.get(id),
+        b = lexicalMap.get(id),
+        row = v?.row || b!.row;
+      const exact = !!code && row.content.toLowerCase().includes(code + ":");
+      return toSource(row, {
+        vectorScore: v?.row.semantic ?? null,
+        bm25Score: b?.row.bm25Score ?? null,
+        vectorRank: v?.rank ?? null,
+        bm25Rank: b?.rank ?? null,
+        score:
+          (v ? 1 / (60 + v.rank) : 0) +
+          (b ? 1 / (60 + b.rank) : 0) +
+          (exact ? 1 : 0),
+      });
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, s.topK)
+    .map((source, i) => ({ ...source, position: i + 1 }));
+  const diagnostics: RetrievalDiagnostics = {
+    vectorResults,
+    bm25Results,
+    overlapIds: [...vectorMap.keys()].filter((id) => lexicalMap.has(id)),
+  };
+  return { sources, diagnostics };
+}
 export async function retrieve(query: string, s: Settings) {
   return db().$transaction(
     async (tx) => {
@@ -60,13 +167,12 @@ export async function retrieve(query: string, s: Settings) {
         );
       const vector = JSON.stringify(model.embed([query])[0]);
       const candidates = await tx.$queryRaw<
-        (Row & { semantic: number; fts: number })[]
+        (Row & { semantic: number })[]
       >(Prisma.sql`
- WITH semantic AS (SELECT c.id FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" WHERE v.active=true ORDER BY c.embedding <=> ${vector}::vector LIMIT 40),
- lexical AS (SELECT c.id FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" WHERE v.active=true AND to_tsvector('russian',c.content) @@ plainto_tsquery('russian',${query}) LIMIT 40)
- SELECT c.id,c."articleId",c.title,c.section,c.content,c.index,c.checksum,c."embeddingHash",d.name AS filename,v.checksum AS version,1-(c.embedding <=> ${vector}::vector) AS semantic,ts_rank_cd(to_tsvector('russian',c.content),plainto_tsquery('russian',${query})) AS fts
- FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE c.id IN(SELECT id FROM semantic UNION SELECT id FROM lexical)`);
-      return { sources: rerank(query, candidates, s), indexHash: model.hash };
+ SELECT c.id,c."articleId",c.title,c.section,c.content,c.index,c.checksum,c."embeddingHash",d.name AS filename,v.checksum AS version,1-(c.embedding <=> ${vector}::vector) AS semantic
+ FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE v.active=true`);
+      const ranked = hybridRank(query, candidates, s);
+      return { ...ranked, indexHash: model.hash };
     },
     { isolationLevel: "RepeatableRead", timeout: 30000 },
   );
@@ -77,21 +183,19 @@ export async function offlineRetrieve(query: string, s: Settings) {
     model = adapter(chunks.map((c) => c.content));
   const queryVector = model.embed([query])[0],
     vectors = model.embed(chunks.map((c) => c.content));
-  return {
-    sources: rerank(
-      query,
-      chunks.map((c, i) => ({
-        ...c,
-        id: c.checksum,
-        filename: "AgentDesk_Knowledge.md",
-        version: hash(text),
-        embeddingHash: model.hash,
-        semantic: cosine(queryVector, vectors[i]),
-      })),
-      s,
-    ),
-    indexHash: model.hash,
-  };
+  const ranked = hybridRank(
+    query,
+    chunks.map((c, i) => ({
+      ...c,
+      id: c.checksum,
+      filename: "AgentDesk_Knowledge.md",
+      version: hash(text),
+      embeddingHash: model.hash,
+      semantic: cosine(queryVector, vectors[i]),
+    })),
+    s,
+  );
+  return { ...ranked, ...ranked.diagnostics, indexHash: model.hash };
 }
 export async function reindexAll(tx = db()) {
   const rows = await corpus(tx);
