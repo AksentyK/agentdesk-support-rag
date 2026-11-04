@@ -14,5 +14,32 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+  web:
+    build: .
+    env_file:
+      - .env.local
+    environment:
+      DATABASE_URL: postgresql://agentdesk:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/agentdesk_rag?schema=public
+      DIRECT_URL: postgresql://agentdesk:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/agentdesk_rag?schema=public
+      APP_ORIGIN: http://localhost:3000
+      EVALUATION_EXECUTOR: worker
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+  worker:
+    build: .
+    profiles: ["worker"]
+    env_file:
+      - .env.local
+    environment:
+      DATABASE_URL: postgresql://agentdesk:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/agentdesk_rag?schema=public
+      DIRECT_URL: postgresql://agentdesk:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/agentdesk_rag?schema=public
+      EVALUATION_EXECUTOR: worker
+    command: ["npm", "run", "worker"]
+    depends_on:
+      db:
+        condition: service_healthy
 volumes:
   agentdesk_pg:

@@ -22,7 +22,29 @@ npm ci
 cp .env.example .env.local
 ```
 
-Задайте локально `POSTGRES_PASSWORD`, `DATABASE_URL` и пароль демонстрации в `.env.local`. Не используйте пароль из примеров в публичной среде. Compose читает переменные отдельно:
+#### Локальный запуск через Docker (Node.js на Mac не требуется)
+
+Создайте `.env.local` в корне с `DATABASE_URL`, `DIRECT_URL`,
+`DEMO_ACCESS_PASSWORD` и при необходимости `ROUTERAI_API_KEY`/моделями. Для
+Docker Compose задайте `POSTGRES_PASSWORD` в корневом `.env`; пароль должен
+совпадать с паролем в URL подключения. Compose сам направит контейнеры на хост
+`db`, даже если в `.env.local` для запуска с Mac указан `localhost`.
+
+```sh
+docker compose up -d db
+docker compose build web
+docker compose run --rm web npm run db:migrate
+docker compose run --rm web npm run db:seed
+docker compose up -d web
+```
+
+Откройте <http://localhost:3000>. Для пакетных AI-тестов запустите отдельный
+контейнер worker: `docker compose --profile worker up -d worker`. Если меняли
+исходный код, пересоберите приложение: `docker compose build web worker` и
+перезапустите сервисы. Не используйте пароль Railway.
+
+Для запуска из Node.js на хосте (Node 24) задайте локально `POSTGRES_PASSWORD`,
+`DATABASE_URL` и пароль демонстрации в `.env.local`. Compose читает переменные отдельно:
 
 ```sh
 # Задайте POSTGRES_PASSWORD в своей оболочке; не вставляйте реальный пароль в Git.
