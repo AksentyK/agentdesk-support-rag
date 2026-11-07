@@ -401,6 +401,22 @@ small,
   overflow: auto;
   font-size: 14px;
 }
+.source-highlight {
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 10px;
+  background: #f7faf5;
+}
+.source-highlight p {
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.source-highlight mark {
+  background: #e5f1a8;
+  color: inherit;
+}
 .charts {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

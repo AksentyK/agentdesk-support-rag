@@ -208,6 +208,65 @@ async function handler(req: NextRequest) {
           : retrieve(data.question, s)),
       );
     }
+    if (path === "chat/sessions" && method === "GET") {
+      const rows = await db().chatSession.findMany({
+        where: { owner },
+        take: 50,
+        select: {
+          id: true,
+          createdAt: true,
+          messages: {
+            orderBy: { createdAt: "desc" },
+            take: 2,
+            select: { role: true, content: true, createdAt: true },
+          },
+        },
+      });
+      return json({
+        sessions: rows
+          .map((row) => ({
+            id: row.id,
+            createdAt: row.createdAt,
+            preview:
+              row.messages.find((message) => message.role === "user")
+                ?.content ||
+              row.messages[0]?.content ||
+              "Новый диалог",
+            lastMessageAt: row.messages[0]?.createdAt || row.createdAt,
+          }))
+          .sort(
+            (a, b) => b.lastMessageAt.getTime() - a.lastMessageAt.getTime(),
+          ),
+      });
+    }
+    const savedChat = path.match(/^chat\/sessions\/([0-9a-f-]{36})$/i);
+    if (savedChat && method === "GET") {
+      const session = await db().chatSession.findFirst({
+        where: { id: savedChat[1], owner },
+        include: {
+          messages: {
+            orderBy: { createdAt: "asc" },
+            // Keep response size bounded while restoring ten question/answer turns.
+            take: 20,
+            select: {
+              role: true,
+              content: true,
+              diagnostics: true,
+              createdAt: true,
+            },
+          },
+        },
+      });
+      if (!session) throw new AppError(404, "Сохранённый диалог не найден.");
+      return json({
+        id: session.id,
+        messages: session.messages.map((message) => ({
+          role: message.role,
+          text: message.content,
+          result: message.diagnostics,
+        })),
+      });
+    }
     if (path === "chat" && method === "POST") {
       await rateLimit("chat:" + owner, 20);
       const data = z

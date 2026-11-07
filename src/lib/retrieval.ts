@@ -48,7 +48,7 @@ export function rerank(
 }
 type HybridRow = Row & { semantic: number };
 /** Okapi BM25 over the active chunk corpus (k1=1.2, b=0.75). Scores are raw BM25. */
-export function bm25Rank(query: string, rows: Row[], limit = 40) {
+export function bm25Scores(query: string, rows: Row[]) {
   const terms = [...new Set(tokens(query))];
   const docs = rows.map((row) => tokens(row.content));
   const lengths = docs.map((doc) => doc.length);
@@ -57,33 +57,35 @@ export function bm25Rank(query: string, rows: Row[], limit = 40) {
   for (const doc of docs)
     for (const term of new Set(doc)) df.set(term, (df.get(term) || 0) + 1);
   const code = query.match(/\bAD-\d{3}\b/i)?.[0].toLowerCase();
+  return rows
+    .map((row, i) => {
+      const tf = new Map<string, number>();
+      for (const term of docs[i]) tf.set(term, (tf.get(term) || 0) + 1);
+      const score = terms.reduce((sum, term) => {
+        const count = tf.get(term) || 0;
+        if (!count) return sum;
+        const n = df.get(term) || 0;
+        const idf = Math.log(1 + (rows.length - n + 0.5) / (n + 0.5));
+        return (
+          sum +
+          (idf * (count * 2.2)) /
+            (count + 1.2 * (0.25 + (0.75 * lengths[i]) / (avgLength || 1)))
+        );
+      }, 0);
+      const exactCode =
+        !!code && row.content.toLowerCase().includes(code + ":");
+      return { ...row, bm25Score: score, exactCode };
+    })
+    .sort(
+      (a, b) =>
+        Number(b.exactCode) - Number(a.exactCode) || b.bm25Score - a.bm25Score,
+    );
+}
+export function bm25Rank(query: string, rows: Row[], limit = 40) {
   return (
-    rows
-      .map((row, i) => {
-        const tf = new Map<string, number>();
-        for (const term of docs[i]) tf.set(term, (tf.get(term) || 0) + 1);
-        const score = terms.reduce((sum, term) => {
-          const count = tf.get(term) || 0;
-          if (!count) return sum;
-          const n = df.get(term) || 0;
-          const idf = Math.log(1 + (rows.length - n + 0.5) / (n + 0.5));
-          return (
-            sum +
-            (idf * (count * 2.2)) /
-              (count + 1.2 * (0.25 + (0.75 * lengths[i]) / (avgLength || 1)))
-          );
-        }, 0);
-        const exactCode =
-          !!code && row.content.toLowerCase().includes(code + ":");
-        return { ...row, bm25Score: score, exactCode };
-      })
+    bm25Scores(query, rows)
       // Ignore incidental one-token hits; retain exact technical-code matches.
       .filter((row) => row.bm25Score >= 0.45 || row.exactCode)
-      .sort(
-        (a, b) =>
-          Number(b.exactCode) - Number(a.exactCode) ||
-          b.bm25Score - a.bm25Score,
-      )
       .slice(0, limit)
   );
 }
@@ -92,7 +94,13 @@ export function hybridRank(query: string, rows: HybridRow[], s: Settings) {
     .sort((a, b) => b.semantic - a.semantic)
     .filter((row) => row.semantic >= s.threshold)
     .slice(0, 40);
-  const lexical = bm25Rank(query, rows);
+  const lexicalScores = new Map(
+    bm25Scores(query, rows).map((row) => [row.id, row]),
+  );
+  const lexical = [...lexicalScores.values()]
+    // Ignore incidental one-token hits; retain exact technical-code matches.
+    .filter((row) => row.bm25Score >= 0.45 || row.exactCode)
+    .slice(0, 40);
   const vectorMap = new Map(
     vectors.map((row, i) => [row.id, { row, rank: i + 1 }]),
   );
@@ -146,10 +154,32 @@ export function hybridRank(query: string, rows: HybridRow[], s: Settings) {
     .sort((a, b) => b.score - a.score)
     .slice(0, s.topK)
     .map((source, i) => ({ ...source, position: i + 1 }));
+  const selectedIds = new Set(sources.map((source) => source.id));
+  const excludedFromContext = rows
+    .filter((row) => !selectedIds.has(row.id))
+    .map((row) => {
+      const eligibleVector = row.semantic >= s.threshold;
+      const bm25 = lexicalScores.get(row.id);
+      const eligibleBm25 = Boolean(
+        bm25 && (bm25.bm25Score >= 0.45 || bm25.exactCode),
+      );
+      const retrieved = vectorMap.has(row.id) || lexicalMap.has(row.id);
+      return {
+        id: row.id,
+        articleId: row.articleId,
+        title: row.title,
+        reason: retrieved
+          ? "outside_top_k"
+          : eligibleVector || eligibleBm25
+            ? "outside_candidate_limit"
+            : "below_relevance_threshold",
+      } as const;
+    });
   const diagnostics: RetrievalDiagnostics = {
     vectorResults,
     bm25Results,
     overlapIds: [...vectorMap.keys()].filter((id) => lexicalMap.has(id)),
+    excludedFromContext,
   };
   return { sources, diagnostics };
 }

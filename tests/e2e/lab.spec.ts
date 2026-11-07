@@ -116,6 +116,21 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
     bm25Rank: 1,
     position: 1,
   };
+  const excluded = {
+    ...source,
+    id: "chunk-not-in-context",
+    articleId: "DOC-ffffffffffff",
+    title: "Другой результат поиска",
+    section: "Не включён в контекст",
+    content: "Этот результат найден, но не отправлялся модели.",
+    vectorScore: 0.5,
+    bm25Score: 0.9,
+    vectorRank: 2,
+    bm25Rank: 2,
+    position: 2,
+  };
+  const historyId = "11111111-1111-4111-8111-111111111111";
+  let chatCalls = 0;
   await page.route("**/api/auth/status", (route) =>
     route.fulfill({ json: { authenticated: true } }),
   );
@@ -143,7 +158,17 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
     }),
   );
   await page.route("**/api/articles", (route) =>
-    route.fulfill({ json: { articles: [] } }),
+    route.fulfill({
+      json: {
+        articles: [
+          {
+            articleId: source.articleId,
+            title: source.title,
+            content: source.content,
+          },
+        ],
+      },
+    }),
   );
   await page.route("**/api/evaluation/cases", (route) =>
     route.fulfill({ json: { cases: [] } }),
@@ -154,7 +179,66 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
   await page.route("**/api/evaluation/runs", (route) =>
     route.fulfill({ json: { runs: [] } }),
   );
+  await page.route("**/api/chat/sessions", (route) =>
+    route.fulfill({
+      json: {
+        sessions: [
+          {
+            id: historyId,
+            preview: "Сохранённый вопрос AD-413",
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/chat/sessions/${historyId}`, (route) =>
+    route.fulfill({
+      json: {
+        id: historyId,
+        messages: [
+          { role: "user", text: "Что означает AD-413?", result: null },
+          {
+            role: "assistant",
+            text: "Сохранённый ответ AD-KB-09.03",
+            result: {
+              answer: "Сохранённый ответ AD-KB-09.03",
+              model: "test/baseline",
+              mode: "baseline-rag",
+              sources: [source],
+              retrieval: {
+                vectorResults: [source],
+                bm25Results: [source],
+                overlapIds: [source.id],
+                excludedFromContext: [],
+              },
+              llmContext: [
+                {
+                  id: source.id,
+                  articleId: source.articleId,
+                  title: source.title,
+                  section: source.section,
+                  content: source.content,
+                  position: 1,
+                },
+              ],
+              citations: [source.articleId],
+              invalidCitations: [],
+              latencyMs: 1,
+              usage: null,
+              cost: null,
+              currency: "RUB",
+              indexHash: "saved-index",
+              status: "ok",
+              pricingSnapshot: {},
+            },
+          },
+        ],
+      },
+    }),
+  );
   await page.route("**/api/chat", async (route) => {
+    chatCalls++;
     const request = route.request().postDataJSON() as {
       role: "baseline" | "strong";
       rag: boolean;
@@ -162,14 +246,24 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
     const rag = request.rag;
     await route.fulfill({
       json: {
-        answer: "Результат проверки.",
+        answer: "**Результат проверки**",
         model: request.role,
         mode: `${request.role}-${rag ? "rag" : "plain"}`,
         sources: rag ? [source] : [],
         retrieval: {
-          vectorResults: rag ? [source] : [],
-          bm25Results: rag ? [source] : [],
-          overlapIds: rag ? [source.id] : [],
+          vectorResults: rag ? [source, excluded] : [],
+          bm25Results: rag ? [source, excluded] : [],
+          overlapIds: rag ? [source.id, excluded.id] : [],
+          excludedFromContext: rag
+            ? [
+                {
+                  id: excluded.id,
+                  articleId: excluded.articleId,
+                  title: excluded.title,
+                  reason: "outside_top_k",
+                },
+              ]
+            : [],
         },
         llmContext: rag
           ? [
@@ -213,14 +307,17 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
       await page.getByRole("button", { name: "Отправить →" }).click();
       const diagnostic = page.getByTestId("rag-diagnostics").last();
       await expect(diagnostic).toBeVisible();
-      await diagnostic.locator("summary").click();
+      await expect(
+        page.locator(".message.assistant .markdown strong").last(),
+      ).toHaveText("Результат проверки");
+      await diagnostic.locator(":scope > summary").click();
       await expect(diagnostic.getByTestId("rag-tab-vector")).toHaveAttribute(
         "aria-selected",
         "true",
       );
       if (rag) {
-        await expect(diagnostic).toContainText("Векторный поиск (1)");
-        await expect(diagnostic).toContainText("BM25 (1)");
+        await expect(diagnostic).toContainText("Векторный поиск (2)");
+        await expect(diagnostic).toContainText("BM25 (2)");
         await expect(diagnostic).toContainText("Контекст LLM (1)");
         await expect(diagnostic).toContainText("Найдены обоими методами");
         await diagnostic.getByTestId("rag-tab-bm25").click();
@@ -231,6 +328,12 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
         await expect(
           diagnostic.getByTestId("rag-diagnostic-panel"),
         ).toContainText("ID фрагмента: chunk-ad413");
+        const contextPanel = diagnostic.getByTestId("rag-diagnostic-panel");
+        await expect(contextPanel.locator(".source").first()).not.toContainText(
+          "chunk-not-in-context",
+        );
+        await expect(contextPanel).toContainText("Исключено из контекста (1)");
+        await expect(contextPanel).toContainText("за пределами top-K");
       } else {
         await expect(diagnostic).toContainText("Векторный поиск (0)");
         await expect(diagnostic).toContainText("BM25 (0)");
@@ -241,6 +344,17 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
       }
     }
   }
+  await page.getByLabel("История чатов").selectOption(historyId);
+  await expect(page.locator(".message.assistant").last()).toContainText(
+    "Сохранённый ответ AD-KB-09.03",
+  );
+  const restoredDiagnostic = page.getByTestId("rag-diagnostics").last();
+  await expect(restoredDiagnostic).toContainText("Диагностика RAG");
+  expect(chatCalls).toBe(4);
+  await page.getByRole("link", { name: source.articleId }).last().click();
+  await expect(page.getByTestId("source-highlight")).toContainText(
+    source.content,
+  );
 });
 
 test("workflow completes all 60 retrieval questions after the browser tab is closed", async ({

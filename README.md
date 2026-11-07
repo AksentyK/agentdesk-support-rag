@@ -105,6 +105,7 @@ npm run db:seed
 npm test                    # 17 проверок, включая реальную pgvector БД и mock RouterAI
 npm run build
 npm run test:bundle          # PDF/DOCX из изолированного пакета после build
+ npm run test:e2e:ui         # RAG tabs/history/Markdown, mock API, без БД и RouterAI
 E2E_EXECUTOR=workflow npm run test:e2e # без отдельного worker
 npm run test:e2e             # Chromium: пароль, поиск, документы, worker, мобильный интерфейс
 ```
@@ -123,18 +124,18 @@ Use the existing `agentdesk-web` service from branch `feat/agentdesk-rag-lab` an
 
 Configure these Railway variables in the service settings; enter secret values only in Railway, never in Git:
 
-| Service | Variable | Value |
-| --- | --- | --- |
-| `agentdesk-db` | `POSTGRES_USER` | `agentdesk` |
-| `agentdesk-db` | `POSTGRES_DB` | `agentdesk_rag` |
-| `agentdesk-db` | `POSTGRES_PASSWORD` | New strong random URL-safe secret, such as 32 random hexadecimal bytes, generated and stored in Railway |
-| `agentdesk-web` | `DATABASE_URL` | `postgresql://agentdesk:${{agentdesk-db.POSTGRES_PASSWORD}}@${{agentdesk-db.RAILWAY_PRIVATE_DOMAIN}}:5432/agentdesk_rag` using Railway reference variables; if the password contains reserved URL characters, URL-encode it instead |
-| `agentdesk-web` | `DEMO_ACCESS_PASSWORD` | Separate strong client-facing password |
-| `agentdesk-web` | `BASELINE_MODEL_ID` | Model ID confirmed in the RouterAI account |
-| `agentdesk-web` | `STRONG_MODEL_ID` | Second confirmed model ID |
-| `agentdesk-web` | `ROUTERAI_API_KEY` | RouterAI key; required only for real LLM calls |
-| `agentdesk-web` | `ROUTERAI_BASE_URL` | `https://routerai.ru/api/v1` |
-| `agentdesk-web` | `APP_ORIGIN` | Final `https://...up.railway.app` origin after creating a public domain; optional before that |
+| Service         | Variable               | Value                                                                                                                                                                                                                               |
+| --------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agentdesk-db`  | `POSTGRES_USER`        | `agentdesk`                                                                                                                                                                                                                         |
+| `agentdesk-db`  | `POSTGRES_DB`          | `agentdesk_rag`                                                                                                                                                                                                                     |
+| `agentdesk-db`  | `POSTGRES_PASSWORD`    | New strong random URL-safe secret, such as 32 random hexadecimal bytes, generated and stored in Railway                                                                                                                             |
+| `agentdesk-web` | `DATABASE_URL`         | `postgresql://agentdesk:${{agentdesk-db.POSTGRES_PASSWORD}}@${{agentdesk-db.RAILWAY_PRIVATE_DOMAIN}}:5432/agentdesk_rag` using Railway reference variables; if the password contains reserved URL characters, URL-encode it instead |
+| `agentdesk-web` | `DEMO_ACCESS_PASSWORD` | Separate strong client-facing password                                                                                                                                                                                              |
+| `agentdesk-web` | `BASELINE_MODEL_ID`    | Model ID confirmed in the RouterAI account                                                                                                                                                                                          |
+| `agentdesk-web` | `STRONG_MODEL_ID`      | Second confirmed model ID                                                                                                                                                                                                           |
+| `agentdesk-web` | `ROUTERAI_API_KEY`     | RouterAI key; required only for real LLM calls                                                                                                                                                                                      |
+| `agentdesk-web` | `ROUTERAI_BASE_URL`    | `https://routerai.ru/api/v1`                                                                                                                                                                                                        |
+| `agentdesk-web` | `APP_ORIGIN`           | Final `https://...up.railway.app` origin after creating a public domain; optional before that                                                                                                                                       |
 
 Railway's private-domain and secret reference syntax should be checked in the variable editor before saving `DATABASE_URL`. An alternative is to set `DATABASE_URL` to a Railway-provided database connection reference if it targets the `agentdesk-db` service and includes the intended database name. Never use `POSTGRES_HOST_AUTH_METHOD=trust` for this demo. No database public domain or TCP proxy is required.
 

@@ -145,7 +145,12 @@ test("all four evaluation modes carry diagnostics, and plain modes declare RAG o
       const mode = `${role}-${rag ? "rag" : "plain"}`;
       const diagnostics = rag
         ? r
-        : { vectorResults: [], bm25Results: [], overlapIds: [] };
+        : {
+            vectorResults: [],
+            bm25Results: [],
+            overlapIds: [],
+            excludedFromContext: [],
+          };
       assert.match(mode, /^(baseline|strong)-(rag|plain)$/);
       assert.ok(diagnostics.vectorResults.length === 0 || rag);
       assert.ok(diagnostics.bm25Results.length === 0 || rag);

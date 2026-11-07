@@ -39,6 +39,13 @@ export type RetrievalDiagnostics = {
   vectorResults: Source[];
   bm25Results: Source[];
   overlapIds: string[];
+  excludedFromContext?: {
+    id: string;
+    articleId: string;
+    title: string;
+    reason:
+      "outside_top_k" | "outside_candidate_limit" | "below_relevance_threshold";
+  }[];
 };
 export type Answer = {
   answer: string;

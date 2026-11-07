@@ -44,6 +44,11 @@ test(
       assert(
         (await retrieve(q, defaults())).sources.some((s) => s.articleId === id),
       );
+    const ad413 = await retrieve("Что означает AD-413?", defaults());
+    assert(ad413.diagnostics.vectorResults.length > 0);
+    assert(ad413.diagnostics.bm25Results.length > 0);
+    assert(ad413.diagnostics.overlapIds.length > 0);
+    assert(ad413.sources.length <= defaults().topK);
     const run = await createRun(
       "integration",
       "dev",
@@ -64,6 +69,39 @@ test(
     assert.equal(completed.completed, 48);
     assert.equal(completed.results.length, 48);
     assert(completed.results.every((r) => r.status === "ok"));
+  },
+);
+test(
+  "real PostgreSQL: saved chat diagnostics restore without rerunning retrieval",
+  { skip: !enabled },
+  async () => {
+    const owner = `diagnostics-${crypto.randomUUID()}`;
+    const session = await db().chatSession.create({ data: { owner } });
+    const savedDiagnostics = {
+      answer: "Сохранённый ответ",
+      retrieval: {
+        vectorResults: [{ id: "vector-result" }],
+        bm25Results: [],
+        overlapIds: [],
+      },
+      llmContext: [{ id: "actual-context" }],
+    };
+    try {
+      await db().message.create({
+        data: {
+          sessionId: session.id,
+          role: "assistant",
+          content: savedDiagnostics.answer,
+          diagnostics: savedDiagnostics,
+        },
+      });
+      const restored = await db().message.findFirstOrThrow({
+        where: { sessionId: session.id, role: "assistant" },
+      });
+      assert.deepEqual(restored.diagnostics, savedDiagnostics);
+    } finally {
+      await db().chatSession.delete({ where: { id: session.id } });
+    }
   },
 );
 test(

@@ -16,6 +16,8 @@ type Doc = {
   versions: { id: string; checksum: string; _count: { chunks: number } }[];
 };
 type Article = { articleId: string; title: string; content: string };
+type ChatSessionSummary = { id: string; preview: string; createdAt: string };
+type SavedChatMessage = { role: string; text: string; result?: Answer | null };
 type Result = {
   id: string;
   caseId: string;
@@ -180,6 +182,7 @@ export default function Lab() {
   const [docs, setDocs] = useState<Doc[]>([]),
     [articles, setArticles] = useState<Article[]>([]),
     [selected, setSelected] = useState<Article | null>(null),
+    [activeSource, setActiveSource] = useState<Source | null>(null),
     [query, setQuery] = useState("");
   const [role, setRole] = useState<"baseline" | "strong">("baseline"),
     [rag, setRag] = useState(true),
@@ -192,6 +195,7 @@ export default function Lab() {
       { role: string; text: string; result?: Answer }[]
     >([]),
     [models, setModels] = useState<string[]>([]);
+  const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [ragDiagnosticTab, setRagDiagnosticTab] = useState<
     "vector" | "bm25" | "context"
@@ -235,10 +239,43 @@ export default function Lab() {
       try {
         setDocs((await api<{ documents: Doc[] }>("documents")).documents);
         setRuns((await api<{ runs: Run[] }>("evaluation/runs")).runs);
+        await refreshChatSessions();
       } catch (e) {
         setError((e as Error).message);
       }
     }
+  }
+  async function refreshChatSessions() {
+    const data = await api<{ sessions: ChatSessionSummary[] }>("chat/sessions");
+    setChatSessions(data.sessions);
+  }
+  async function openChatSession(id: string) {
+    const saved = await api<{ id: string; messages: SavedChatMessage[] }>(
+      `chat/sessions/${id}`,
+    );
+    const restored = saved.messages.map((message) => ({
+      role: message.role,
+      text: message.text,
+      ...(message.result && message.result.retrieval
+        ? { result: message.result }
+        : {}),
+    }));
+    setSessionId(saved.id);
+    setMessages(restored);
+    const latestAnswer = [...restored]
+      .reverse()
+      .find((message) => message.result);
+    setDiagnostic(latestAnswer?.result || null);
+    setSources(latestAnswer?.result?.sources || []);
+    setActiveSource(null);
+    setRagDiagnosticTab("vector");
+    if (latestAnswer?.result?.mode.startsWith("strong-")) setRole("strong");
+    else if (latestAnswer?.result?.mode.startsWith("baseline-"))
+      setRole("baseline");
+    if (latestAnswer?.result?.mode.endsWith("-rag")) setRag(true);
+    else if (latestAnswer?.result?.mode.endsWith("-plain")) setRag(false);
+    setMobile("chat");
+    setTab("chat");
   }
   useEffect(() => {
     api<{ authenticated: boolean }>("auth/status")
@@ -274,6 +311,7 @@ export default function Lab() {
         rag,
         sessionId,
       });
+      setRagDiagnosticTab("vector");
       setSessionId(result.sessionId);
       setMessages((m) => [
         ...m,
@@ -283,6 +321,7 @@ export default function Lab() {
       setSources(result.sources);
       setDiagnostic(result);
       setQuestion("");
+      await refreshChatSessions();
     });
   }
   async function search() {
@@ -637,10 +676,28 @@ export default function Lab() {
                     setSessionId(undefined);
                     setDiagnostic(null);
                     setSources([]);
+                    setActiveSource(null);
+                    setRagDiagnosticTab("vector");
                   }}
                 >
                   Новая сессия
                 </button>
+                <select
+                  aria-label="История чатов"
+                  style={{ maxWidth: 220 }}
+                  value={sessionId || ""}
+                  onChange={(event) => {
+                    const id = event.target.value;
+                    if (id) void perform(() => openChatSession(id));
+                  }}
+                >
+                  <option value="">История чатов</option>
+                  {chatSessions.map((session) => (
+                    <option key={session.id} value={session.id}>
+                      {session.preview.slice(0, 72)}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div
                 className="padded row"
@@ -703,6 +760,7 @@ export default function Lab() {
                             );
                             if (article) {
                               setSelected(article);
+                              setActiveSource(source);
                               setTab("knowledge");
                               setMobile("knowledge");
                             } else {
@@ -817,16 +875,52 @@ export default function Lab() {
                                   Поиск по базе знаний отключён.
                                 </p>
                               ) : (
-                                <Sources
-                                  idPrefix={`message-${i}`}
-                                  sources={
-                                    ragDiagnosticTab === "vector"
-                                      ? m.result.retrieval.vectorResults
-                                      : ragDiagnosticTab === "bm25"
-                                        ? m.result.retrieval.bm25Results
-                                        : m.result.llmContext
-                                  }
-                                />
+                                <>
+                                  {ragDiagnosticTab === "context" && (
+                                    <p className="muted">
+                                      Фрагменты ниже показаны в том порядке, в
+                                      котором они были переданы модели.
+                                    </p>
+                                  )}
+                                  <Sources
+                                    idPrefix={`message-${i}`}
+                                    sources={
+                                      ragDiagnosticTab === "vector"
+                                        ? m.result.retrieval.vectorResults
+                                        : ragDiagnosticTab === "bm25"
+                                          ? m.result.retrieval.bm25Results
+                                          : m.result.llmContext
+                                    }
+                                  />
+                                  {ragDiagnosticTab === "context" &&
+                                    (m.result.retrieval.excludedFromContext
+                                      ?.length ?? 0) > 0 && (
+                                      <details className="source">
+                                        <summary>
+                                          Исключено из контекста (
+                                          {
+                                            m.result.retrieval
+                                              .excludedFromContext?.length
+                                          }
+                                          )
+                                        </summary>
+                                        {m.result.retrieval.excludedFromContext?.map(
+                                          (item) => (
+                                            <p key={item.id}>
+                                              <strong>{item.articleId}</strong>{" "}
+                                              · {item.title} ·{" "}
+                                              {item.reason === "outside_top_k"
+                                                ? "за пределами top-K"
+                                                : item.reason ===
+                                                    "outside_candidate_limit"
+                                                  ? "за пределами лимита кандидатов метода"
+                                                  : "ниже порога релевантности"}
+                                            </p>
+                                          ),
+                                        )}
+                                      </details>
+                                    )}
+                                </>
                               )}
                             </div>
                           </details>
@@ -989,6 +1083,17 @@ export default function Lab() {
             <div className="articletext" id="knowledge-source">
               {selected?.content}
             </div>
+            {activeSource && activeSource.articleId === selected?.articleId && (
+              <div className="source-highlight" data-testid="source-highlight">
+                <small>
+                  Использованный фрагмент · {activeSource.section} · ID{" "}
+                  {activeSource.id}
+                </small>
+                <p>
+                  <mark>{activeSource.content}</mark>
+                </p>
+              </div>
+            )}
           </article>
         </div>
       )}

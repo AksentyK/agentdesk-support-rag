@@ -96,7 +96,12 @@ export async function answer(
     ? await retrieve(question, s)
     : {
         sources: [],
-        diagnostics: { vectorResults: [], bm25Results: [], overlapIds: [] },
+        diagnostics: {
+          vectorResults: [],
+          bm25Results: [],
+          overlapIds: [],
+          excludedFromContext: [],
+        },
         indexHash: "without-rag",
       };
   // This exact list builds the provider message below and is returned for diagnostics.
