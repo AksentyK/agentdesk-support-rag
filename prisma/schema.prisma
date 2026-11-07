@@ -77,6 +77,10 @@ model EvaluationRun {
   total Int
   cancelled Boolean @default(false)
   createdAt DateTime @default(now())
+  executor String @default("worker")
+  nextBatch Int @default(0)
+  leaseToken String?
+  leaseExpiresAt DateTime?
   results EvaluationResult[]
 }
 model EvaluationResult {
@@ -100,4 +104,20 @@ model RateLimit {
   id String @id
   count Int
   expiresAt DateTime
+}
+
+model DocumentUpload {
+  id String @id @default(uuid())
+  owner String @unique
+  name String
+  size Int
+  expiresAt DateTime
+  parts DocumentUploadPart[]
+}
+model DocumentUploadPart {
+  uploadId String
+  upload DocumentUpload @relation(fields:[uploadId],references:[id],onDelete:Cascade)
+  index Int
+  data Bytes
+  @@id([uploadId,index])
 }

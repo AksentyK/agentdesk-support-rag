@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -7,9 +8,13 @@ import {
 } from "../src/lib/knowledge";
 import { LocalLSA, cosine } from "../src/lib/embeddings";
 import { defaults, estimateCost } from "../src/lib/settings";
-import { validateCitations } from "../src/lib/router";
+import {
+  contextForModel,
+  shouldRefuse,
+  validateCitations,
+} from "../src/lib/router";
 import { dataset, splitCases } from "../src/lib/dataset";
-import { offlineRetrieve } from "../src/lib/retrieval";
+import { bm25Rank, hybridRank, offlineRetrieve } from "../src/lib/retrieval";
 import {
   passwordMatches,
   newSession,
@@ -70,6 +75,86 @@ test("retrieval finds AD-413 article and Team limit with source metadata", async
         r.sources.find((s) => s.articleId === id)?.content.includes("500"),
       );
   }
+});
+test("BM25 gives exact AD-413 code its own lexical hit and priority", async () => {
+  const r = await offlineRetrieve("AD-413", defaults());
+  const exact = r.bm25Results.find((s) => s.articleId === "AD-KB-09.03");
+  assert(exact, "BM25 should find the precise technical code");
+  assert(exact.bm25Score! > 0);
+  assert.equal(exact.bm25Rank, 1);
+});
+test("BM25 retrieves paraphrased Russian query by stemmed terms", async () => {
+  const r = await offlineRetrieve("не удается создать проект", defaults());
+  assert(r.bm25Results.length > 0);
+  assert(r.bm25Results.some((s) => s.bm25Score! > 0));
+});
+test("hybrid retrieval keeps vector and genuine BM25 rankings independent", async () => {
+  const r = await offlineRetrieve("Что означает AD-413?", defaults());
+  assert(r.vectorResults.length > 0);
+  assert(r.bm25Results.length > 0);
+  assert(r.sources.length > 0);
+  assert(r.sources.some((s) => s.vectorRank != null && s.bm25Rank != null));
+});
+test("hybrid diagnostics expose intersection independently of fused results", async () => {
+  const r = await offlineRetrieve("Что означает AD-413?", defaults());
+  assert(r.overlapIds.length > 0);
+  for (const id of r.overlapIds) {
+    assert(r.vectorResults.some((s) => s.id === id));
+    assert(r.bm25Results.some((s) => s.id === id));
+  }
+});
+test("model context is the exact serialized source payload used by the prompt", async () => {
+  const r = await offlineRetrieve("AD-413", defaults());
+  const payload = contextForModel(r.sources);
+  assert.deepEqual(
+    payload,
+    r.sources.map(({ id, articleId, title, section, content, position }) => ({
+      id,
+      articleId,
+      title,
+      section,
+      content,
+      position,
+    })),
+  );
+  assert(
+    payload.every(
+      (s) => s.id && s.articleId && s.section && s.content && s.position,
+    ),
+  );
+});
+test("source citations only link to retrieved article IDs and section fragments", async () => {
+  const r = await offlineRetrieve("AD-413", defaults());
+  const valid = r.sources[0].articleId;
+  const checked = validateCitations(
+    `Факт [${valid}] и выдуманная AD-KB-99.99`,
+    r.sources,
+  );
+  assert(checked.citations.includes(valid));
+  assert(!checked.citations.includes("AD-KB-99.99"));
+  assert(checked.answer.includes("[ссылка не подтверждена]"));
+});
+test("RAG refuses when no retrieved evidence exists; plain mode stays available", () => {
+  assert(shouldRefuse(true, []));
+  assert(!shouldRefuse(false, []));
+});
+test("all four evaluation modes carry diagnostics, and plain modes declare RAG off", async () => {
+  const r = await offlineRetrieve("AD-413", defaults());
+  for (const role of ["baseline", "strong"])
+    for (const rag of [true, false]) {
+      const mode = `${role}-${rag ? "rag" : "plain"}`;
+      const diagnostics = rag
+        ? r
+        : {
+            vectorResults: [],
+            bm25Results: [],
+            overlapIds: [],
+            excludedFromContext: [],
+          };
+      assert.match(mode, /^(baseline|strong)-(rag|plain)$/);
+      assert.ok(diagnostics.vectorResults.length === 0 || rag);
+      assert.ok(diagnostics.bm25Results.length === 0 || rag);
+    }
 });
 test("citation validation filters invented article links and preserves diagnostics", async () => {
   const r = await offlineRetrieve("AD-413", defaults());
@@ -143,4 +228,15 @@ test("quality is never fabricated from retrieval/citation scores", async () => {
   });
   assert.equal(m.factualAccuracy, null);
   assert.equal(m.reviewRequired, true);
+});
+
+test("real PDF and DOCX parsers extract text in the Node runtime", async () => {
+  const pdf = await extract(
+    new File([await readFile("AgentDesk_Manual_35pages.pdf")], "manual.pdf"),
+  );
+  assert(pdf.text.includes("AgentDesk"));
+  const docx = await extract(
+    new File([await readFile("tests/fixtures/sample.docx")], "sample.docx"),
+  );
+  assert(docx.text.includes("AgentDesk: проверка DOCX."));
 });

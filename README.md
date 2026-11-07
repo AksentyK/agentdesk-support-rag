@@ -2,6 +2,10 @@
 
 Русскоязычный MVP AI-поддержки для **вымышленного** AgentDesk. Next.js 16 / React 19 / TypeScript / Tailwind CSS 4, PostgreSQL 17 + pgvector, Prisma 7 с JavaScript PostgreSQL-адаптером, серверный OpenAI SDK для RouterAI. Зависимости зафиксированы в `package-lock.json`; Node.js 24 LTS.
 
+## Подготовка переноса на Vercel + Neon
+
+Ветка `feat/vercel-migration`: [аудит, архитектура worker, настройка preview, перенос данных и откат](docs/VERCEL_MIGRATION.md). На Vercel пакетные тесты выполняет Workflow; локальный/Railway worker сохранён. Загрузка до 20 МБ передаётся частями через PostgreSQL. Миграции и seed не запускаются во время Vercel build. Действующий Railway этим изменением не переключается.
+
 ## Что реализовано
 
 - Чат с историей сессии, экономичной/сильной моделью и переключателем RAG. Четыре режима используют одинаковые настройки генерации. Параметры и цены сохраняются в БД; model ID проверяются по `/models` перед сохранением и реальным вызовом. Недоступная модель не заменяется автоматически.
@@ -18,7 +22,29 @@ npm ci
 cp .env.example .env.local
 ```
 
-Задайте локально `POSTGRES_PASSWORD`, `DATABASE_URL` и пароль демонстрации в `.env.local`. Не используйте пароль из примеров в публичной среде. Compose читает переменные отдельно:
+#### Локальный запуск через Docker (Node.js на Mac не требуется)
+
+Создайте `.env.local` в корне с `DATABASE_URL`, `DIRECT_URL`,
+`DEMO_ACCESS_PASSWORD` и при необходимости `ROUTERAI_API_KEY`/моделями. Для
+Docker Compose задайте `POSTGRES_PASSWORD` в корневом `.env`; пароль должен
+совпадать с паролем в URL подключения. Compose сам направит контейнеры на хост
+`db`, даже если в `.env.local` для запуска с Mac указан `localhost`.
+
+```sh
+docker compose up -d db
+docker compose build web
+docker compose run --rm web npm run db:migrate
+docker compose run --rm web npm run db:seed
+docker compose up -d web
+```
+
+Откройте <http://localhost:3000>. Для пакетных AI-тестов запустите отдельный
+контейнер worker: `docker compose --profile worker up -d worker`. Если меняли
+исходный код, пересоберите приложение: `docker compose build web worker` и
+перезапустите сервисы. Не используйте пароль Railway.
+
+Для запуска из Node.js на хосте (Node 24) задайте локально `POSTGRES_PASSWORD`,
+`DATABASE_URL` и пароль демонстрации в `.env.local`. Compose читает переменные отдельно:
 
 ```sh
 # Задайте POSTGRES_PASSWORD в своей оболочке; не вставляйте реальный пароль в Git.
@@ -70,14 +96,17 @@ npm run start:railway
 
 ```sh
 npm run typecheck
-npm test                    # без DATABASE_URL: 12 unit, 2 integration skipped
+npm test                    # без DATABASE_URL: 13 unit, 4 integration skipped
 npm run test:retrieval       # только 48 dev; без ключа и без БД
 npm run test:retrieval:db    # все 60, с сохранением результатов в отдельную тестовую БД
 # С работающей БД и DATABASE_URL:
 npm run db:migrate
 npm run db:seed
-npm test                    # 14 проверок, включая реальную pgvector БД и mock RouterAI
+npm test                    # 17 проверок, включая реальную pgvector БД и mock RouterAI
 npm run build
+npm run test:bundle          # PDF/DOCX из изолированного пакета после build
+ npm run test:e2e:ui         # RAG tabs/history/Markdown, mock API, без БД и RouterAI
+E2E_EXECUTOR=workflow npm run test:e2e # без отдельного worker
 npm run test:e2e             # Chromium: пароль, поиск, документы, worker, мобильный интерфейс
 ```
 
@@ -95,18 +124,18 @@ Use the existing `agentdesk-web` service from branch `feat/agentdesk-rag-lab` an
 
 Configure these Railway variables in the service settings; enter secret values only in Railway, never in Git:
 
-| Service | Variable | Value |
-| --- | --- | --- |
-| `agentdesk-db` | `POSTGRES_USER` | `agentdesk` |
-| `agentdesk-db` | `POSTGRES_DB` | `agentdesk_rag` |
-| `agentdesk-db` | `POSTGRES_PASSWORD` | New strong random URL-safe secret, such as 32 random hexadecimal bytes, generated and stored in Railway |
-| `agentdesk-web` | `DATABASE_URL` | `postgresql://agentdesk:${{agentdesk-db.POSTGRES_PASSWORD}}@${{agentdesk-db.RAILWAY_PRIVATE_DOMAIN}}:5432/agentdesk_rag` using Railway reference variables; if the password contains reserved URL characters, URL-encode it instead |
-| `agentdesk-web` | `DEMO_ACCESS_PASSWORD` | Separate strong client-facing password |
-| `agentdesk-web` | `BASELINE_MODEL_ID` | Model ID confirmed in the RouterAI account |
-| `agentdesk-web` | `STRONG_MODEL_ID` | Second confirmed model ID |
-| `agentdesk-web` | `ROUTERAI_API_KEY` | RouterAI key; required only for real LLM calls |
-| `agentdesk-web` | `ROUTERAI_BASE_URL` | `https://routerai.ru/api/v1` |
-| `agentdesk-web` | `APP_ORIGIN` | Final `https://...up.railway.app` origin after creating a public domain; optional before that |
+| Service         | Variable               | Value                                                                                                                                                                                                                               |
+| --------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agentdesk-db`  | `POSTGRES_USER`        | `agentdesk`                                                                                                                                                                                                                         |
+| `agentdesk-db`  | `POSTGRES_DB`          | `agentdesk_rag`                                                                                                                                                                                                                     |
+| `agentdesk-db`  | `POSTGRES_PASSWORD`    | New strong random URL-safe secret, such as 32 random hexadecimal bytes, generated and stored in Railway                                                                                                                             |
+| `agentdesk-web` | `DATABASE_URL`         | `postgresql://agentdesk:${{agentdesk-db.POSTGRES_PASSWORD}}@${{agentdesk-db.RAILWAY_PRIVATE_DOMAIN}}:5432/agentdesk_rag` using Railway reference variables; if the password contains reserved URL characters, URL-encode it instead |
+| `agentdesk-web` | `DEMO_ACCESS_PASSWORD` | Separate strong client-facing password                                                                                                                                                                                              |
+| `agentdesk-web` | `BASELINE_MODEL_ID`    | Model ID confirmed in the RouterAI account                                                                                                                                                                                          |
+| `agentdesk-web` | `STRONG_MODEL_ID`      | Second confirmed model ID                                                                                                                                                                                                           |
+| `agentdesk-web` | `ROUTERAI_API_KEY`     | RouterAI key; required only for real LLM calls                                                                                                                                                                                      |
+| `agentdesk-web` | `ROUTERAI_BASE_URL`    | `https://routerai.ru/api/v1`                                                                                                                                                                                                        |
+| `agentdesk-web` | `APP_ORIGIN`           | Final `https://...up.railway.app` origin after creating a public domain; optional before that                                                                                                                                       |
 
 Railway's private-domain and secret reference syntax should be checked in the variable editor before saving `DATABASE_URL`. An alternative is to set `DATABASE_URL` to a Railway-provided database connection reference if it targets the `agentdesk-db` service and includes the intended database name. Never use `POSTGRES_HOST_AUTH_METHOD=trust` for this demo. No database public domain or TCP proxy is required.
 

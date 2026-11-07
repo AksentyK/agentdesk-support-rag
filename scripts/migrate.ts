@@ -2,8 +2,11 @@ import { Client } from "pg";
 import { readdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 async function main() {
-  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL required");
-  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;
+  if (!connectionString) throw new Error("DIRECT_URL or DATABASE_URL required");
+  if (new URL(connectionString).hostname.includes("-pooler."))
+    throw new Error("Migrations require the direct Neon endpoint");
+  const client = new Client({ connectionString });
   await client.connect();
   try {
     await client.query("SELECT pg_advisory_lock(451394)");

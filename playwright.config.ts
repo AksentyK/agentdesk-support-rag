@@ -17,12 +17,18 @@ export default defineConfig({
     },
   },
   webServer: {
-    command: "npm run start:railway",
+    command:
+      process.env.E2E_EXECUTOR === "workflow"
+        ? "npm start -- --port 3187"
+        : "npm run start:railway",
     url: "http://localhost:3187/api/health",
     timeout: 60000,
     reuseExistingServer: false,
     env: {
       PORT: "3187",
+      EVALUATION_EXECUTOR: process.env.E2E_EXECUTOR || "worker",
+      WORKFLOW_TARGET_WORLD: "local",
+      WORKFLOW_LOCAL_BASE_URL: "http://localhost:3187",
       NODE_ENV: "production",
       DEMO_ACCESS_PASSWORD: process.env.TEST_DEMO_PASSWORD,
       ROUTERAI_API_KEY: "",

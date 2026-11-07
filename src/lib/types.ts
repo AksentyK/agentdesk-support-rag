@@ -25,12 +25,35 @@ export type Source = {
   index: number;
   checksum: string;
   score: number;
+  vectorScore?: number | null;
+  bm25Score?: number | null;
+  vectorRank?: number | null;
+  bm25Rank?: number | null;
+  position?: number;
+};
+export type ContextFragment = Pick<
+  Source,
+  "id" | "articleId" | "title" | "section" | "content" | "position"
+>;
+export type RetrievalDiagnostics = {
+  vectorResults: Source[];
+  bm25Results: Source[];
+  overlapIds: string[];
+  excludedFromContext?: {
+    id: string;
+    articleId: string;
+    title: string;
+    reason:
+      "outside_top_k" | "outside_candidate_limit" | "below_relevance_threshold";
+  }[];
 };
 export type Answer = {
   answer: string;
   model: string | null;
   mode: string;
   sources: Source[];
+  retrieval: RetrievalDiagnostics;
+  llmContext: ContextFragment[];
   citations: string[];
   invalidCitations: string[];
   latencyMs: number;
