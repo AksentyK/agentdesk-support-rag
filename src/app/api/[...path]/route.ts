@@ -9,7 +9,7 @@ import {
   sessionOwner,
   rateLimit,
 } from "@/lib/auth";
-import { settings, settingsSchema } from "@/lib/settings";
+import { settings, settingsSchema, defaults } from "@/lib/settings";
 import { catalog, validateModels, answer } from "@/lib/router";
 import { bundledKnowledge, articles } from "@/lib/knowledge";
 import {
@@ -173,12 +173,21 @@ async function handler(req: NextRequest) {
     }
     if (uploadMatch && method === "POST" && uploadMatch[2] === "complete")
       return json(await finishUpload(uploadMatch[1], owner));
-    if (path === "settings" && method === "GET")
+    if (path === "settings" && method === "GET") {
+      let configured = Boolean(process.env.DATABASE_URL);
+      let current = defaults();
+      try {
+        current = await settings();
+      } catch {
+        // Keep the standalone Markdown BM25 search usable during DB outages.
+        configured = false;
+      }
       return json({
-        settings: await settings(),
+        settings: current,
         keyConfigured: Boolean(process.env.ROUTERAI_API_KEY),
-        databaseConfigured: Boolean(process.env.DATABASE_URL),
+        databaseConfigured: configured,
       });
+    }
     if (path === "settings" && method === "PUT") {
       const s = settingsSchema.parse(await body(req));
       if (s.baseline || s.strong) await validateModels(s);
@@ -201,11 +210,10 @@ async function handler(req: NextRequest) {
           offline: z.boolean().default(false),
         })
         .parse(await body(req));
-      const s = await settings();
       return json(
         await (data.offline
-          ? offlineRetrieve(data.question, s)
-          : retrieve(data.question, s)),
+          ? offlineRetrieve(data.question, defaults())
+          : retrieve(data.question, await settings())),
       );
     }
     if (path === "chat/sessions" && method === "GET") {

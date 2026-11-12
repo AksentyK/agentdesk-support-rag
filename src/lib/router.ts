@@ -70,13 +70,36 @@ export function validateCitations(text: string, sources: Source[]) {
 }
 export function contextForModel(sources: Source[]) {
   return sources.map(
-    ({ id, articleId, title, section, content, position }) => ({
+    ({
       id,
       articleId,
       title,
       section,
       content,
       position,
+      score,
+      vectorScore,
+      bm25Score,
+      vectorRank,
+      bm25Rank,
+      filename,
+      version,
+      index,
+    }) => ({
+      id,
+      articleId,
+      title,
+      section,
+      content,
+      position,
+      score,
+      vectorScore,
+      bm25Score,
+      vectorRank,
+      bm25Rank,
+      filename,
+      version,
+      index,
     }),
   );
 }

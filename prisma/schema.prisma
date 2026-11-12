@@ -34,6 +34,7 @@ model Chunk {
   embedding Unsupported("vector(256)")?
   embeddingHash String
   embeddingV2 Unsupported("vector")?
+  embeddingV2Hash String?
   embeddingModel String?
   embeddingDimensions Int?
   @@index([versionId])

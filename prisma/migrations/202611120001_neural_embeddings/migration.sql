@@ -2,6 +2,7 @@
 -- vector(256) and its hash intact until the new index has been verified.
 ALTER TABLE "Chunk"
   ADD COLUMN "embeddingV2" vector,
+  ADD COLUMN "embeddingV2Hash" text,
   ADD COLUMN "embeddingModel" text,
   ADD COLUMN "embeddingDimensions" integer;
 

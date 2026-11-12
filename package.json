@@ -11,6 +11,7 @@
     "db:migrate": "node --env-file-if-exists=.env.local --import tsx scripts/migrate.ts",
     "db:seed": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts",
     "check:embeddings": "node --env-file-if-exists=.env.local --import tsx scripts/check-embeddings.ts",
+    "db:reindex-neural": "node --env-file-if-exists=.env.local --import tsx scripts/reindex-neural.ts",
     "test:retrieval": "node --env-file-if-exists=.env.local --import tsx scripts/retrieval.ts",
     "postinstall": "node scripts/generate.mjs",
     "db:generate": "node scripts/generate.mjs",

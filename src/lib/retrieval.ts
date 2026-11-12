@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { db } from "./db";
-import { cosine, tokens, neuralEmbeddings, embeddingRevision } from "./embeddings";
+import { tokens, neuralEmbeddings, embeddingRevision } from "./embeddings";
 import { hash, chunkArticles, bundledKnowledge } from "./knowledge";
 import { AppError } from "./errors";
 import type { RetrievalDiagnostics, Settings, Source } from "./types";
@@ -17,11 +17,13 @@ type Row = {
   embeddingHash: string;
   embeddingModel?: string | null;
   embeddingDimensions?: number | null;
+  embeddingV2Hash?: string | null;
+  hasEmbeddingV2?: boolean;
 };
 export async function corpus(tx = db()) {
   return tx.$queryRaw<
     Row[]
-  >`SELECT c.id,c."articleId",c.title,c.section,c.content,c.index,c.checksum,c."embeddingHash",c."embeddingModel",c."embeddingDimensions",d.name AS filename,v.checksum AS version FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE v.active=true ORDER BY d.name,c."articleId",c.index`;
+  >`SELECT c.id,c."articleId",c.title,c.section,c.content,c.index,c.checksum,c."embeddingHash",c."embeddingV2Hash",c."embeddingModel",c."embeddingDimensions",(c."embeddingV2" IS NOT NULL) AS "hasEmbeddingV2",d.name AS filename,v.checksum AS version FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE v.active=true ORDER BY d.name,c."articleId",c.index`;
 }
 export function lexicalScore(query: string, text: string) {
   const qt = [...new Set(tokens(query))],
@@ -191,17 +193,33 @@ export async function retrieve(query: string, s: Settings) {
       const rows = await corpus(tx as unknown as ReturnType<typeof db>);
       if (!rows.length)
         throw new AppError(409, "Индекс пуст. Импортируйте базу знаний.");
-      const configuredModel = process.env.EMBEDDING_MODEL || "qwen/qwen3-embedding-8b";
-      const dimensions = Number(process.env.EMBEDDING_DIMENSIONS || rows[0].embeddingDimensions || 0);
-      if (!dimensions || rows.some((r) =>
-        r.embeddingModel !== configuredModel ||
-        r.embeddingDimensions !== dimensions ||
-        r.embeddingHash !== embeddingRevision(configuredModel, dimensions)
-      ))
-        throw new AppError(409, "Нейросетевой индекс не готов. Сначала выполните явную переиндексацию.");
+      const configuredModel =
+        process.env.EMBEDDING_MODEL || "Qwen/Qwen3-Embedding-8B";
+      const dimensions = Number(process.env.EMBEDDING_DIMENSIONS || 4096);
+      if (
+        !dimensions ||
+        rows.some(
+          (r) =>
+            r.embeddingModel !== configuredModel ||
+            r.embeddingDimensions !== dimensions ||
+            r.embeddingV2Hash !==
+              embeddingRevision(configuredModel, dimensions),
+        )
+      )
+        throw new AppError(
+          409,
+          "Нейросетевой индекс не готов. Сначала выполните явную переиндексацию.",
+        );
       const queryEmbedding = await neuralEmbeddings([query]);
-      const revision = embeddingRevision(queryEmbedding.model, queryEmbedding.dimensions);
-      if (queryEmbedding.model !== configuredModel || queryEmbedding.dimensions !== dimensions || rows.some((r) => r.embeddingHash !== revision))
+      const revision = embeddingRevision(
+        queryEmbedding.model,
+        queryEmbedding.dimensions,
+      );
+      if (
+        queryEmbedding.model !== configuredModel ||
+        queryEmbedding.dimensions !== dimensions ||
+        rows.some((r) => r.embeddingV2Hash !== revision)
+      )
         throw new AppError(
           409,
           "Нейросетевой индекс отсутствует или требует переиндексации.",
@@ -211,7 +229,7 @@ export async function retrieve(query: string, s: Settings) {
         (Row & { semantic: number })[]
       >(Prisma.sql`
  SELECT c.id,c."articleId",c.title,c.section,c.content,c.index,c.checksum,c."embeddingHash",d.name AS filename,v.checksum AS version,1-(c."embeddingV2" <=> ${vector}::vector) AS semantic
- FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE v.active=true AND c."embeddingModel"=${queryEmbedding.model} AND c."embeddingDimensions"=${queryEmbedding.dimensions} AND c."embeddingHash"=${revision} AND c."embeddingV2" IS NOT NULL`);
+ FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE v.active=true AND c."embeddingModel"=${queryEmbedding.model} AND c."embeddingDimensions"=${queryEmbedding.dimensions} AND c."embeddingV2Hash"=${revision} AND c."embeddingV2" IS NOT NULL`);
       const ranked = hybridRank(query, candidates, s);
       return { ...ranked, indexHash: revision };
     },
@@ -251,21 +269,49 @@ export async function offlineRetrieve(query: string, s: Settings) {
         title: row.title,
         reason: "below_relevance_threshold" as const,
       })),
-    diagnostics: { vectorResults: [], bm25Results, overlapIds: [], excludedFromContext: [] },
+    diagnostics: {
+      vectorResults: [],
+      bm25Results,
+      overlapIds: [],
+      excludedFromContext: [],
+    },
     indexHash: hash("markdown-bm25-v1:" + text),
   };
 }
 export async function reindexAll(tx = db()) {
   const rows = await corpus(tx);
-  if (!rows.length) return;
-  const modelName = process.env.EMBEDDING_MODEL || "qwen/qwen3-embedding-8b";
-  for (let start = 0; start < rows.length; start += 32) {
-    const batch = rows.slice(start, start + 32);
+  if (!rows.length) return { indexed: 0, total: 0 };
+  const targetModel = process.env.EMBEDDING_MODEL || "Qwen/Qwen3-Embedding-8B";
+  const targetDimensions = Number(process.env.EMBEDDING_DIMENSIONS || 4096);
+  const revision = embeddingRevision(targetModel, targetDimensions);
+  const pending = rows.filter(
+    (r) => r.embeddingV2Hash !== revision || !r.hasEmbeddingV2,
+  );
+  let indexed = 0;
+  for (let start = 0; start < pending.length; start += 16) {
+    const batch = pending.slice(start, start + 16);
     const result = await neuralEmbeddings(batch.map((r) => r.content));
-    const revision = embeddingRevision(result.model, result.dimensions);
-    for (let i = 0; i < batch.length; i++)
-      await tx.$executeRaw`UPDATE "Chunk" SET "embeddingV2"=${JSON.stringify(result.vectors[i])}::vector,"embeddingModel"=${result.model},"embeddingDimensions"=${result.dimensions},"embeddingHash"=${revision} WHERE id=${batch[i].id}`;
+    const batchRevision = embeddingRevision(result.model, result.dimensions);
+    if (result.model !== targetModel || result.dimensions !== targetDimensions)
+      throw new Error(
+        "RouterAI embedding model or dimensions differ from configured index.",
+      );
+    for (let i = 0; i < batch.length; i++) {
+      await tx.$executeRaw`UPDATE "Chunk" SET "embeddingV2"=${JSON.stringify(result.vectors[i])}::vector,"embeddingV2Hash"=${batchRevision},"embeddingModel"=${result.model},"embeddingDimensions"=${result.dimensions} WHERE id=${batch[i].id}`;
+      indexed++;
+    }
+    console.log(
+      `Neural reindex progress: ${Math.min(start + batch.length, pending.length)}/${pending.length} pending chunks`,
+    );
   }
+  const remaining = await tx.$queryRaw<
+    { count: bigint }[]
+  >`SELECT count(*)::bigint AS count FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" WHERE v.active=true AND (c."embeddingV2Hash" IS DISTINCT FROM ${revision} OR c."embeddingV2" IS NULL)`;
+  if (Number(remaining[0]?.count || 0) !== 0)
+    throw new Error(
+      "Neural reindex incomplete; existing vectors have been preserved and the command can be resumed.",
+    );
+  return { indexed, total: rows.length };
 }
 export async function importDocument(name: string, text: string) {
   if (!text.trim())
@@ -273,7 +319,7 @@ export async function importDocument(name: string, text: string) {
   const checksum = hash(text);
   return db().$transaction(
     async (tx) => {
-      // Serialize corpus changes so a reader cannot observe partially rebuilt vectors.
+      // Serialize corpus changes; indexing stays an explicit, separately approved action.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(451392)`;
       const doc = await tx.document.upsert({
         where: { name },
@@ -307,7 +353,6 @@ export async function importDocument(name: string, text: string) {
             embeddingHash: "pending",
           })),
         });
-      await reindexAll(tx as unknown as ReturnType<typeof db>);
       return doc;
     },
     { timeout: 120000 },

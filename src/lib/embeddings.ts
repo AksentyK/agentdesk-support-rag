@@ -18,7 +18,8 @@ export function tokens(text: string) {
     .map((w) => (/[а-я]/.test(w) ? stemmer.stem(w) : w));
 }
 export const DIMENSIONS = 256;
-export const DEFAULT_EMBEDDING_MODEL = "qwen/qwen3-embedding-8b";
+export const DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B";
+export const DEFAULT_EMBEDDING_DIMENSIONS = 4096;
 export const ROUTERAI_EMBEDDINGS_URL = "https://routerai.ru/api/v1/embeddings";
 export type NeuralEmbeddingBatch = {
   model: string;
@@ -31,11 +32,17 @@ export async function requestRouterEmbeddings(
   options: {
     apiKey: string;
     model?: string;
+    expectedDimensions?: number;
     endpoint?: string;
     fetcher?: typeof fetch;
   },
 ): Promise<NeuralEmbeddingBatch> {
-  if (!texts.length) return { model: options.model || DEFAULT_EMBEDDING_MODEL, dimensions: 0, vectors: [] };
+  if (!texts.length)
+    return {
+      model: options.model || DEFAULT_EMBEDDING_MODEL,
+      dimensions: 0,
+      vectors: [],
+    };
   const endpoint = options.endpoint || ROUTERAI_EMBEDDINGS_URL;
   if (new URL(endpoint).protocol !== "https:")
     throw new Error("Embedding endpoint must use HTTPS.");
@@ -58,8 +65,12 @@ export async function requestRouterEmbeddings(
     data?: { index?: number; embedding?: number[] }[];
   };
   if (!Array.isArray(payload.data) || payload.data.length !== texts.length)
-    throw new Error("Embedding provider returned an unexpected number of vectors.");
-  const ordered = [...payload.data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    throw new Error(
+      "Embedding provider returned an unexpected number of vectors.",
+    );
+  const ordered = [...payload.data].sort(
+    (a, b) => (a.index ?? 0) - (b.index ?? 0),
+  );
   const vectors = ordered.map((item) => item.embedding);
   const dimensions = vectors[0]?.length || 0;
   if (
@@ -69,10 +80,16 @@ export async function requestRouterEmbeddings(
         !v || v.length !== dimensions || v.some((n) => !Number.isFinite(n)),
     )
   )
-    throw new Error("Embedding provider returned invalid or inconsistent vector dimensions.");
-  const expected = Number(process.env.EMBEDDING_DIMENSIONS || 0);
+    throw new Error(
+      "Embedding provider returned invalid or inconsistent vector dimensions.",
+    );
+  const expected =
+    options.expectedDimensions ??
+    Number(process.env.EMBEDDING_DIMENSIONS || DEFAULT_EMBEDDING_DIMENSIONS);
   if (expected && expected !== dimensions)
-    throw new Error(`Embedding dimension mismatch: configured ${expected}, received ${dimensions}.`);
+    throw new Error(
+      `Embedding dimension mismatch: configured ${expected}, received ${dimensions}.`,
+    );
   return {
     model: payload.model || options.model || DEFAULT_EMBEDDING_MODEL,
     dimensions,
@@ -80,10 +97,15 @@ export async function requestRouterEmbeddings(
   };
 }
 
-export async function neuralEmbeddings(texts: string[]): Promise<NeuralEmbeddingBatch> {
+export async function neuralEmbeddings(
+  texts: string[],
+): Promise<NeuralEmbeddingBatch> {
   const apiKey = process.env.ROUTERAI_API_KEY;
-  if (!apiKey) throw new Error("ROUTERAI_API_KEY is not configured for embeddings.");
-  const expected = Number(process.env.EMBEDDING_DIMENSIONS || 0);
+  if (!apiKey)
+    throw new Error("ROUTERAI_API_KEY is not configured for embeddings.");
+  const expected = Number(
+    process.env.EMBEDDING_DIMENSIONS || DEFAULT_EMBEDDING_DIMENSIONS,
+  );
   const full: number[][] = [];
   let model = process.env.EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
   let dimensions = expected;
@@ -91,6 +113,7 @@ export async function neuralEmbeddings(texts: string[]): Promise<NeuralEmbedding
     const part = await requestRouterEmbeddings(texts.slice(i, i + 32), {
       apiKey,
       model,
+      expectedDimensions: expected,
       endpoint: process.env.EMBEDDING_ENDPOINT || ROUTERAI_EMBEDDINGS_URL,
     });
     if (dimensions && part.dimensions !== dimensions)

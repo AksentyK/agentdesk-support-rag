@@ -74,9 +74,11 @@ const money = (value: number | null | undefined, currency = "RUB") =>
 function Sources({
   sources,
   idPrefix = "src",
+  showRrfScore = false,
 }: {
   sources: (Source | ContextFragment)[];
   idPrefix?: string;
+  showRrfScore?: boolean;
 }) {
   return (
     <>
@@ -94,14 +96,17 @@ function Sources({
             {"bm25Score" in s &&
               s.bm25Score != null &&
               ` · BM25 ${s.bm25Score.toFixed(3)}`}
+            {showRrfScore &&
+              typeof s.score === "number" &&
+              ` · RRF ${s.score.toFixed(5)}`}
             <br />
             {s.title}
           </summary>
           <p>{s.content}</p>
           <small>
-            {"filename" in s
-              ? `${s.filename} · версия ${s.version.slice(0, 12)} · чанк ${s.index}`
-              : `Раздел: ${s.section} · ID фрагмента: ${s.id}`}
+            {s.filename || "Документ"} · {s.section} · версия{" "}
+            {s.version?.slice(0, 12) || "legacy"} · чанк {s.index ?? "—"} · ID{" "}
+            {s.id}
           </small>
         </details>
       ))}
@@ -189,6 +194,13 @@ export default function Lab() {
     [offline, setOffline] = useState(true),
     [question, setQuestion] = useState(""),
     [sources, setSources] = useState<Source[]>([]),
+    [searchResult, setSearchResult] = useState<{
+      sources: Source[];
+      vectorResults: Source[];
+      bm25Results: Source[];
+      overlapIds: string[];
+      offline?: boolean;
+    } | null>(null),
     [diagnostic, setDiagnostic] = useState<Answer | null>(null),
     [sessionId, setSessionId] = useState<string | undefined>();
   const [messages, setMessages] = useState<
@@ -324,12 +336,20 @@ export default function Lab() {
       await refreshChatSessions();
     });
   }
-  async function search() {
+  async function search(searchQuestion = question) {
+    if (!searchQuestion.trim()) return;
     await perform(async () => {
-      const result = await api<{ sources: Source[] }>("search", {
-        question,
+      const result = await api<{
+        sources: Source[];
+        vectorResults: Source[];
+        bm25Results: Source[];
+        overlapIds: string[];
+        offline?: boolean;
+      }>("search", {
+        question: searchQuestion,
         offline,
       });
+      setSearchResult({ ...result, offline });
       setSources(result.sources);
       setMobile("diagnostics");
     });
@@ -500,7 +520,8 @@ export default function Lab() {
       </section>
       <nav className="tabs" aria-label="Разделы">
         {[
-          ["chat", "Диалог и поиск"],
+          ["chat", "Диалог"],
+          ["search", "Поиск"],
           ["knowledge", "База знаний"],
           ["evaluation", "Сравнение моделей"],
           ["settings", "Настройки"],
@@ -525,8 +546,8 @@ export default function Lab() {
       {!database && (
         <div className="notice" style={{ marginBottom: 18 }}>
           База данных не подключена. Доступны встроенные статьи и автономный
-          LSA-поиск. Чат, импорт и сохранение экспериментов требуют PostgreSQL с
-          pgvector.
+          BM25-поиск по Markdown. Чат, импорт и сохранение экспериментов требуют
+          PostgreSQL с pgvector.
         </div>
       )}
       {tab === "chat" && (
@@ -864,14 +885,92 @@ export default function Lab() {
                                   .join(", ")}
                               </p>
                             )}
-                            <div className="rag-diagnostic-grid" data-testid="rag-diagnostic-panel">
-                              {(["vector", "bm25", "context"] as const).map((key) => (
-                                <section key={key} className={`rag-column ${ragDiagnosticTab === key ? "selected" : ""}`}>
-                                  <h4>{key === "vector" ? `Векторный поиск (${m.result!.retrieval.vectorResults.length})` : key === "bm25" ? `BM25 (${m.result!.retrieval.bm25Results.length})` : `Контекст LLM (${m.result!.llmContext.length})`}</h4>
-                                  {key === "context" && <p className="muted">Показаны только фрагменты из фактического запроса модели.</p>}
-                                  {m.result!.mode.endsWith("-plain") ? <p data-testid="rag-disabled">Поиск по базе знаний отключён.</p> : <Sources idPrefix={`message-${i}-${key}`} sources={key === "vector" ? m.result!.retrieval.vectorResults : key === "bm25" ? m.result!.retrieval.bm25Results : m.result!.llmContext} />}
-                                </section>
-                              ))}
+                            <div
+                              className="rag-diagnostic-grid"
+                              data-testid="rag-diagnostic-panel"
+                            >
+                              {m.result!.retrieval.overlapIds.length > 0 && (
+                                <p className="muted rag-overlap">
+                                  Найдены обоими методами:{" "}
+                                  {m
+                                    .result!.retrieval.overlapIds.map(
+                                      (id) =>
+                                        m.result!.sources.find(
+                                          (s) => s.id === id,
+                                        )?.articleId || id,
+                                    )
+                                    .join(", ")}
+                                </p>
+                              )}
+                              {(["vector", "bm25", "context"] as const).map(
+                                (key) => (
+                                  <section
+                                    key={key}
+                                    className={`rag-column ${ragDiagnosticTab === key ? "selected" : ""}`}
+                                  >
+                                    <h4>
+                                      {key === "vector"
+                                        ? `Векторный поиск (${m.result!.retrieval.vectorResults.length})`
+                                        : key === "bm25"
+                                          ? `BM25 (${m.result!.retrieval.bm25Results.length})`
+                                          : `Контекст LLM (${m.result!.llmContext.length})`}
+                                    </h4>
+                                    {key === "context" && (
+                                      <p className="muted">
+                                        Показаны только фрагменты из
+                                        фактического запроса модели.
+                                      </p>
+                                    )}
+                                    {m.result!.mode.endsWith("-plain") ? (
+                                      <p data-testid="rag-disabled">
+                                        Поиск по базе знаний отключён.
+                                      </p>
+                                    ) : (
+                                      <Sources
+                                        idPrefix={`message-${i}-${key}`}
+                                        showRrfScore={key === "context"}
+                                        sources={
+                                          key === "vector"
+                                            ? m.result!.retrieval.vectorResults
+                                            : key === "bm25"
+                                              ? m.result!.retrieval.bm25Results
+                                              : m.result!.llmContext
+                                        }
+                                      />
+                                    )}
+                                    {key === "context" &&
+                                      (m.result!.retrieval.excludedFromContext
+                                        ?.length ?? 0) > 0 && (
+                                        <details className="source">
+                                          <summary>
+                                            Исключено из контекста (
+                                            {
+                                              m.result!.retrieval
+                                                .excludedFromContext!.length
+                                            }
+                                            )
+                                          </summary>
+                                          {m.result!.retrieval.excludedFromContext!.map(
+                                            (item) => (
+                                              <p key={item.id}>
+                                                <strong>
+                                                  {item.articleId}
+                                                </strong>{" "}
+                                                · {item.title} ·{" "}
+                                                {item.reason === "outside_top_k"
+                                                  ? "за пределами top-K"
+                                                  : item.reason ===
+                                                      "outside_candidate_limit"
+                                                    ? "за пределами лимита кандидатов метода"
+                                                    : "ниже порога релевантности"}
+                                              </p>
+                                            ),
+                                          )}
+                                        </details>
+                                      )}
+                                  </section>
+                                ),
+                              )}
                             </div>
                           </details>
                         </>
@@ -988,6 +1087,73 @@ export default function Lab() {
             </aside>
           </div>
         </>
+      )}
+      {tab === "search" && (
+        <section className="panel padded" aria-label="Поиск по базе знаний">
+          <h2>Поиск по базе знаний</h2>
+          <p className="muted">
+            Сравните результаты векторного поиска, BM25 и объединённую выдачу.
+          </p>
+          <form
+            className="row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void search(query);
+            }}
+          >
+            <input
+              aria-label="Запрос для поиска"
+              placeholder="Введите вопрос или фразу для поиска…"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              style={{ flex: 1, minWidth: 220 }}
+            />
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={offline}
+                onChange={(event) => setOffline(event.target.checked)}
+              />
+              Автономный поиск по Markdown
+            </label>
+            <button className="primary" disabled={busy || query.trim().length < 2}>
+              Найти
+            </button>
+          </form>
+          {searchResult && (
+            <div className="stack" style={{ marginTop: 24 }}>
+              {searchResult.offline && (
+                <div className="notice">Векторный поиск отключён в автономном режиме.</div>
+              )}
+              <section aria-label="Объединённая выдача">
+                <h3>Объединённая выдача ({searchResult.sources.length})</h3>
+                {searchResult.sources.length ? (
+                  <Sources sources={searchResult.sources} showRrfScore />
+                ) : <p className="muted">Фрагменты не найдены.</p>}
+              </section>
+              <div className="search-columns">
+                <section aria-label="Векторный поиск">
+                  <h3>Векторный поиск ({searchResult.vectorResults.length})</h3>
+                  {searchResult.vectorResults.length ? <Sources sources={searchResult.vectorResults} /> : <p className="muted">Нет результатов.</p>}
+                </section>
+                <section aria-label="BM25">
+                  <h3>BM25 ({searchResult.bm25Results.length})</h3>
+                  {searchResult.bm25Results.length ? <Sources sources={searchResult.bm25Results} /> : <p className="muted">Нет результатов.</p>}
+                </section>
+              </div>
+              {!searchResult.offline && (
+                <p className="muted">
+                  Найдены обоими методами: {searchResult.overlapIds.length
+                    ? searchResult.overlapIds.map((id) => {
+                        const source = [...searchResult.vectorResults, ...searchResult.bm25Results].find((item) => item.id === id);
+                        return source?.articleId || id;
+                      }).join(", ")
+                    : "нет пересечения"}
+                </p>
+              )}
+            </div>
+          )}
+        </section>
       )}
       {tab === "knowledge" && (
         <div className="articles">

@@ -35,7 +35,13 @@ test("password, Russian UI, offline retrieval, document upload and persistent ev
     .filter({ hasText: "Страница 23." })
     .click();
   await expect(page.locator(".articletext")).toContainText("500 документов");
-  await page.getByRole("button", { name: "Диалог и поиск" }).click();
+  await page.getByRole("button", { name: "Поиск", exact: true }).click();
+  await page.getByLabel("Запрос для поиска").fill("ошибка AD-413");
+  await page.getByRole("button", { name: "Найти" }).click();
+  await expect(page.getByRole("region", { name: "BM25" })).toContainText("AD-KB-09.03");
+  await expect(page.getByRole("region", { name: "Векторный поиск" })).toContainText("Нет результатов");
+  await expect(page.getByText("Векторный поиск отключён в автономном режиме.")).toBeVisible();
+  await page.getByRole("button", { name: "Диалог", exact: true }).click();
   await page.locator("input[type=file]").setInputFiles({
     name: "e2e-note.txt",
     mimeType: "text/plain",
@@ -96,7 +102,52 @@ test("mobile tabs keep search and source inspection usable", async ({
   ).toBe(true);
 });
 
-test("chat exposes real API diagnostics tabs for all four comparison modes", async ({
+test("offline search tab displays BM25 results and an empty vector channel", async ({ page }) => {
+  const chunk = {
+    id: "chunk-413",
+    articleId: "AD-KB-09.03",
+    title: "Ошибки документов",
+    section: "Страница 28",
+    content: "AD-413 означает, что файл больше предела тарифа.",
+    filename: "AgentDesk_Knowledge.md",
+    version: "markdown-v1",
+    index: 0,
+    checksum: "checksum-413",
+    score: 3.1,
+    bm25Score: 3.1,
+    bm25Rank: 1,
+    vectorScore: null,
+    vectorRank: null,
+    position: 1,
+  };
+  await page.route("**/api/auth/status", (route) => route.fulfill({ json: { authenticated: false } }));
+  await page.route("**/api/auth/login", (route) => route.fulfill({ json: { ok: true } }));
+  await page.route("**/api/settings", (route) => route.fulfill({ json: {
+    settings: { baseline: "base", strong: "strong", topK: 5, threshold: 0.18, semanticWeight: 0.7, temperature: 0.2, maxTokens: 1000, currency: "RUB", baselineInput: null, baselineOutput: null, strongInput: null, strongOutput: null, pricingDate: "2026-11-12" },
+    keyConfigured: false,
+    databaseConfigured: false,
+  } }));
+  await page.route("**/api/articles", (route) => route.fulfill({ json: { articles: [] } }));
+  await page.route("**/api/evaluation/cases", (route) => route.fulfill({ json: { cases: [] } }));
+  await page.route("**/api/search", async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({ question: "ошибка AD-413", offline: true });
+    await route.fulfill({ json: {
+      sources: [chunk], vectorResults: [], bm25Results: [chunk], overlapIds: [], offline: true,
+    } });
+  });
+  await page.goto("/");
+  await page.getByLabel("Пароль", { exact: true }).fill("test-password");
+  await page.getByRole("button", { name: "Войти в лабораторию" }).click();
+  await page.getByRole("button", { name: "Поиск", exact: true }).click();
+  await page.getByLabel("Запрос для поиска").fill("ошибка AD-413");
+  await page.getByRole("button", { name: "Найти" }).click();
+  await expect(page.getByRole("region", { name: "BM25" })).toContainText("AD-KB-09.03");
+  await expect(page.getByRole("region", { name: "BM25" })).toContainText("BM25 3.100");
+  await expect(page.getByRole("region", { name: "Векторный поиск" })).toContainText("Нет результатов");
+  await expect(page.getByText("Векторный поиск отключён в автономном режиме.")).toBeVisible();
+});
+
+test("chat exposes three diagnostics panels for all four comparison modes", async ({
   page,
 }) => {
   const source = {
@@ -220,6 +271,14 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
                   section: source.section,
                   content: source.content,
                   position: 1,
+                  score: source.score,
+                  vectorScore: source.vectorScore,
+                  bm25Score: source.bm25Score,
+                  vectorRank: source.vectorRank,
+                  bm25Rank: source.bm25Rank,
+                  filename: source.filename,
+                  version: source.version,
+                  index: source.index,
                 },
               ],
               citations: [source.articleId],
@@ -274,6 +333,14 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
                 section: source.section,
                 content: source.content,
                 position: 1,
+                score: source.score,
+                vectorScore: source.vectorScore,
+                bm25Score: source.bm25Score,
+                vectorRank: source.vectorRank,
+                bm25Rank: source.bm25Rank,
+                filename: source.filename,
+                version: source.version,
+                index: source.index,
               },
             ]
           : [],
@@ -311,24 +378,20 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
         page.locator(".message.assistant .markdown strong").last(),
       ).toHaveText("Результат проверки");
       await diagnostic.locator(":scope > summary").click();
-      await expect(diagnostic.getByTestId("rag-tab-vector")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
       if (rag) {
         await expect(diagnostic).toContainText("Векторный поиск (2)");
         await expect(diagnostic).toContainText("BM25 (2)");
         await expect(diagnostic).toContainText("Контекст LLM (1)");
         await expect(diagnostic).toContainText("Найдены обоими методами");
-        await diagnostic.getByTestId("rag-tab-bm25").click();
-        await expect(
-          diagnostic.getByTestId("rag-diagnostic-panel"),
-        ).toContainText("BM25 5.424");
-        await diagnostic.getByTestId("rag-tab-context").click();
-        await expect(
-          diagnostic.getByTestId("rag-diagnostic-panel"),
-        ).toContainText("ID фрагмента: chunk-ad413");
-        const contextPanel = diagnostic.getByTestId("rag-diagnostic-panel");
+        await expect(diagnostic.locator(".rag-column").nth(0)).toContainText(
+          "similarity 0.872",
+        );
+        await expect(diagnostic.locator(".rag-column").nth(1)).toContainText(
+          "BM25 5.424",
+        );
+        const contextPanel = diagnostic.locator(".rag-column").nth(2);
+        await expect(contextPanel).toContainText("ID chunk-ad413");
+        await expect(contextPanel).toContainText("RRF 0.80000");
         await expect(contextPanel.locator(".source").first()).not.toContainText(
           "chunk-not-in-context",
         );
@@ -338,7 +401,7 @@ test("chat exposes real API diagnostics tabs for all four comparison modes", asy
         await expect(diagnostic).toContainText("Векторный поиск (0)");
         await expect(diagnostic).toContainText("BM25 (0)");
         await expect(diagnostic).toContainText("Контекст LLM (0)");
-        await expect(diagnostic.getByTestId("rag-disabled")).toHaveText(
+        await expect(diagnostic.getByTestId("rag-disabled").first()).toHaveText(
           "Поиск по базе знаний отключён.",
         );
       }

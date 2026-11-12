@@ -564,6 +564,21 @@ td.answer {
   padding: 10px;
   background: var(--surface, #fff);
 }
+.search-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.search-columns > section {
+  min-width: 0;
+  border: 1px solid var(--line, #e4e7e1);
+  border-radius: 10px;
+  padding: 12px;
+}
+.search-columns h3 { margin: 0 0 10px; font-size: 14px; }
+@media (max-width: 760px) {
+  .search-columns { grid-template-columns: 1fr; }
+}
 .rag-diagnostics > summary {
   cursor: pointer;
   font-size: 12px;

@@ -3,7 +3,7 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests/e2e",
   testMatch: "lab.spec.ts",
-  grep: /chat exposes real API diagnostics tabs/,
+  grep: /chat exposes three diagnostics panels|offline search tab displays BM25 results/,
   fullyParallel: false,
   workers: 1,
   timeout: 60000,

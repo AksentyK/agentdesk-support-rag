@@ -6,7 +6,11 @@ import {
   bundledKnowledge,
   chunkArticles,
 } from "../src/lib/knowledge";
-import { LocalLSA, cosine, requestRouterEmbeddings } from "../src/lib/embeddings";
+import {
+  LocalLSA,
+  cosine,
+  requestRouterEmbeddings,
+} from "../src/lib/embeddings";
 import { defaults, estimateCost } from "../src/lib/settings";
 import {
   contextForModel,
@@ -54,26 +58,53 @@ test("LSA embeds into finite 256D normalized vectors with semantic projection", 
   assert(Math.abs(cosine(a, b) - 1) < 1e-8);
   assert.equal(cosine(c, c), 0);
 });
-test("RouterAI embedding adapter validates model response and actual dimensions", async () => {
+test("RouterAI embedding adapter validates 4096D response and preserves item order", async () => {
   const result = await requestRouterEmbeddings(["вопрос", "ответ"], {
     apiKey: "mock-secret",
-    model: "qwen/qwen3-embedding-8b",
+    model: "Qwen/Qwen3-Embedding-8B",
+    expectedDimensions: 4096,
     fetcher: async (_input, init) => {
-      assert.equal(init?.headers && new Headers(init.headers).get("authorization"), "Bearer mock-secret");
+      assert.equal(
+        init?.headers && new Headers(init.headers).get("authorization"),
+        "Bearer mock-secret",
+      );
       const body = JSON.parse(String(init?.body));
-      assert.equal(body.model, "qwen/qwen3-embedding-8b");
-      return new Response(JSON.stringify({
-        model: body.model,
-        data: [
-          { index: 1, embedding: [0, 1, 0] },
-          { index: 0, embedding: [1, 0, 0] },
-        ],
-      }), { status: 200 });
+      assert.equal(body.model, "Qwen/Qwen3-Embedding-8B");
+      return new Response(
+        JSON.stringify({
+          model: body.model,
+          data: [
+            {
+              index: 1,
+              embedding: Array.from({ length: 4096 }, (_, i) =>
+                i === 1 ? 1 : 0,
+              ),
+            },
+            {
+              index: 0,
+              embedding: Array.from({ length: 4096 }, (_, i) =>
+                i === 0 ? 1 : 0,
+              ),
+            },
+          ],
+        }),
+        { status: 200 },
+      );
     },
   });
-  assert.equal(result.dimensions, 3);
-  assert.deepEqual(result.vectors[0], [1, 0, 0]);
-  assert.deepEqual(result.vectors[1], [0, 1, 0]);
+  assert.equal(result.dimensions, 4096);
+  assert.equal(result.vectors[0][0], 1);
+  assert.equal(result.vectors[1][1], 1);
+});
+test("neural vector migration is additive and leaves the legacy vector column untouched", async () => {
+  const sql = await readFile(
+    "prisma/migrations/202611120001_neural_embeddings/migration.sql",
+    "utf8",
+  );
+  assert.match(sql, /ADD COLUMN "embeddingV2" vector/);
+  assert.match(sql, /ADD COLUMN "embeddingV2Hash" text/);
+  assert.doesNotMatch(sql, /DROP COLUMN|UPDATE "Chunk" SET embedding=/i);
+  assert.doesNotMatch(sql, /USING hnsw|vector_cosine_ops/i);
 });
 test("dataset has stratified deterministic 48/12 split and isolated unknown questions", async () => {
   const all = await dataset();
@@ -125,14 +156,39 @@ test("model context is the exact serialized source payload used by the prompt", 
   const payload = contextForModel(r.sources);
   assert.deepEqual(
     payload,
-    r.sources.map(({ id, articleId, title, section, content, position }) => ({
-      id,
-      articleId,
-      title,
-      section,
-      content,
-      position,
-    })),
+    r.sources.map(
+      ({
+        id,
+        articleId,
+        title,
+        section,
+        content,
+        position,
+        score,
+        vectorScore,
+        bm25Score,
+        vectorRank,
+        bm25Rank,
+        filename,
+        version,
+        index,
+      }) => ({
+        id,
+        articleId,
+        title,
+        section,
+        content,
+        position,
+        score,
+        vectorScore,
+        bm25Score,
+        vectorRank,
+        bm25Rank,
+        filename,
+        version,
+        index,
+      }),
+    ),
   );
   assert(
     payload.every(

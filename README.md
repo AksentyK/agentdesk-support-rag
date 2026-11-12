@@ -84,7 +84,9 @@ npm start
 
 ### RouterAI neural embeddings
 
-`EMBEDDING_MODEL` defaults to `qwen/qwen3-embedding-8b`; the endpoint defaults to `https://routerai.ru/api/v1/embeddings`. `EMBEDDING_DIMENSIONS` may pin the expected response size after a one-request probe with `npm run check:embeddings`. The probe reports only endpoint, model, dimension and vector validity. It is a real provider request and may be billable; run it only when authorized. A migration adds a new dimension-flexible vector column and metadata while retaining legacy vectors unchanged. No ANN index is created until the provider dimension is measured. RAG refuses to call the embedding endpoint until every active chunk carries the selected model, measured dimension and matching revision. Do not run `npm run db:seed` or document reindexing before approving embedding usage: both may trigger paid embedding requests.
+RouterAI embeddings were verified once by the operator: `Qwen/Qwen3-Embedding-8B`, 4096 dimensions. The endpoint is `https://routerai.ru/api/v1/embeddings`; set `ROUTERAI_API_KEY` only in the secret environment. The additive migration adds a dimension-flexible vector column and separate model, dimension and revision metadata while preserving legacy vectors and their hash. pgvector HNSW does not support 4096 dimensions; this MVP intentionally uses exact cosine search across the 35-chunk corpus. `npm run db:reindex-neural` defaults to a no-request dry run. Indexing 35 chunks takes 3 embedding API requests (batches of 16, 16, and 3); the provider price is not documented here, so total cost cannot be estimated reliably. Actual indexing requires both `--execute` and `REINDEX_NEURAL_CONFIRM=YES`, skips chunks already indexed at the selected revision, and must only be run after separately approving API use. Document import itself does not trigger paid indexing.
+
+Rollback SQL is provided beside the migration as `rollback.sql`; it removes only the new neural columns and migration ledger row, leaving legacy vectors and source data intact. Apply no migration or rollback until the target database has been positively identified and a backup saved.
 
 ### Prisma и миграции
 
@@ -116,7 +118,7 @@ Integration/e2e требуют **отдельную тестовую БД**, м�
 
 ## Ограничения MVP
 
-- Локальная LSA на небольшом корпусе может вернуть похожие статьи для неизвестной функции. Наличие найденных фрагментов не означает наличие ответа; системная инструкция требует отказа без подтверждения. Проверка prompt injection и фактических отказов на реальных моделях остаётся обязательной перед публичным использованием.
+- RAG использует RouterAI Qwen3 4096D эмбеддинги и exact cosine search по небольшому корпусу. Наличие найденных фрагментов не означает наличие ответа; системная инструкция требует отказа без подтверждения. Проверка prompt injection и фактических отказов на реальных моделях остаётся обязательной перед публичным использованием. Старые LSA-векторы остаются только как сохраняемый legacy snapshot и не участвуют в поиске.
 - Пароль демо общий: любой вошедший пользователь может менять документы/настройки и тратить разрешённый лимит. Изоляция сессий и тестов — по подписанной cookie; после нового входа старая история остаётся в БД, но не становится доступной новой сессии. Это не многопользовательский production-продукт с RBAC.
 - Ограничение логина хранится в памяти одной реплики; остальные лимиты — в PostgreSQL. Для масштабирования нужны общий auth rate limiter, очередь и роли. Страницы HTML — оболочка приложения; данные и действия защищены серверным API.
 - Документы извлекаются синхронно, до 200 PDF-страниц и 2 млн символов текста, DOCX с лимитом заявленной ZIP-распаковки. Нужны отдельный sandbox/parser worker и антивирус для работы с враждебными публичными загрузками. Не загружайте секреты: базовый детектор не гарантирует обнаружение всех форматов ключей.

@@ -33,7 +33,20 @@ export type Source = {
 };
 export type ContextFragment = Pick<
   Source,
-  "id" | "articleId" | "title" | "section" | "content" | "position"
+  | "id"
+  | "articleId"
+  | "title"
+  | "section"
+  | "content"
+  | "position"
+  | "score"
+  | "vectorScore"
+  | "bm25Score"
+  | "vectorRank"
+  | "bm25Rank"
+  | "filename"
+  | "version"
+  | "index"
 >;
 export type RetrievalDiagnostics = {
   vectorResults: Source[];
