@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { Client } from "pg";
 import { db } from "./db";
 import { tokens, neuralEmbeddings, embeddingRevision } from "./embeddings";
 import { hash, chunkArticles, bundledKnowledge } from "./knowledge";
@@ -188,43 +189,61 @@ export function hybridRank(query: string, rows: HybridRow[], s: Settings) {
   return { sources, diagnostics };
 }
 export async function retrieve(query: string, s: Settings) {
+  const configuredModel =
+    process.env.EMBEDDING_MODEL || "Qwen/Qwen3-Embedding-8B";
+  const dimensions = Number(process.env.EMBEDDING_DIMENSIONS || 4096);
+  const expectedRevision = embeddingRevision(configuredModel, dimensions);
+  // Readiness check and external embedding request happen before opening the
+  // short, repeatable-read transaction used for the actual vector query.
+  const initialRows = await corpus();
+  if (!initialRows.length)
+    throw new AppError(409, "Индекс пуст. Импортируйте базу знаний.");
+  if (
+    !dimensions ||
+    initialRows.some(
+      (r) =>
+        r.embeddingModel !== configuredModel ||
+        r.embeddingDimensions !== dimensions ||
+        r.embeddingV2Hash !== expectedRevision ||
+        !r.hasEmbeddingV2,
+    )
+  )
+    throw new AppError(
+      409,
+      "Нейросетевой индекс не готов. Сначала выполните явную переиндексацию.",
+    );
+  const queryEmbedding = await neuralEmbeddings([query]);
+  const revision = embeddingRevision(
+    queryEmbedding.model,
+    queryEmbedding.dimensions,
+  );
+  if (
+    queryEmbedding.model !== configuredModel ||
+    queryEmbedding.dimensions !== dimensions ||
+    revision !== expectedRevision
+  )
+    throw new AppError(
+      409,
+      "Нейросетевой индекс отсутствует или требует переиндексации.",
+    );
+  const vector = JSON.stringify(queryEmbedding.vectors[0]);
   return db().$transaction(
     async (tx) => {
       const rows = await corpus(tx as unknown as ReturnType<typeof db>);
-      if (!rows.length)
-        throw new AppError(409, "Индекс пуст. Импортируйте базу знаний.");
-      const configuredModel =
-        process.env.EMBEDDING_MODEL || "Qwen/Qwen3-Embedding-8B";
-      const dimensions = Number(process.env.EMBEDDING_DIMENSIONS || 4096);
       if (
-        !dimensions ||
+        rows.length !== initialRows.length ||
         rows.some(
-          (r) =>
-            r.embeddingModel !== configuredModel ||
-            r.embeddingDimensions !== dimensions ||
-            r.embeddingV2Hash !==
-              embeddingRevision(configuredModel, dimensions),
+          (r, i) =>
+            r.id !== initialRows[i].id ||
+            r.version !== initialRows[i].version ||
+            r.embeddingV2Hash !== expectedRevision ||
+            !r.hasEmbeddingV2,
         )
       )
         throw new AppError(
           409,
-          "Нейросетевой индекс не готов. Сначала выполните явную переиндексацию.",
+          "Индекс изменился во время поиска. Повторите запрос.",
         );
-      const queryEmbedding = await neuralEmbeddings([query]);
-      const revision = embeddingRevision(
-        queryEmbedding.model,
-        queryEmbedding.dimensions,
-      );
-      if (
-        queryEmbedding.model !== configuredModel ||
-        queryEmbedding.dimensions !== dimensions ||
-        rows.some((r) => r.embeddingV2Hash !== revision)
-      )
-        throw new AppError(
-          409,
-          "Нейросетевой индекс отсутствует или требует переиндексации.",
-        );
-      const vector = JSON.stringify(queryEmbedding.vectors[0]);
       const candidates = await tx.$queryRaw<
         (Row & { semantic: number })[]
       >(Prisma.sql`
@@ -278,40 +297,89 @@ export async function offlineRetrieve(query: string, s: Settings) {
     indexHash: hash("markdown-bm25-v1:" + text),
   };
 }
-export async function reindexAll(tx = db()) {
-  const rows = await corpus(tx);
-  if (!rows.length) return { indexed: 0, total: 0 };
+export async function reindexAll() {
+  const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL;
+  if (!connectionString)
+    throw new Error("DIRECT_URL is required for safe neural reindexing.");
+  const parsed = new URL(connectionString);
+  if (parsed.hostname.includes("-pooler.") || !parsed.hostname.endsWith(".neon.tech"))
+    throw new Error("Neural reindexing requires a direct Neon connection.");
+  if (!process.env.REINDEX_NEURAL_EXPECTED_HOST || parsed.hostname !== process.env.REINDEX_NEURAL_EXPECTED_HOST)
+    throw new Error("Neural reindexing requires an exact REINDEX_NEURAL_EXPECTED_HOST match.");
+  if (!process.env.REINDEX_NEURAL_EXPECTED_DATABASE)
+    throw new Error("Neural reindexing requires REINDEX_NEURAL_EXPECTED_DATABASE.");
+  if (
+    process.env.REINDEX_NEURAL_EXPECTED_DATABASE === "agentdesk_rag" &&
+    (!process.env.NEON_ACTIVE_HOST || parsed.hostname === process.env.NEON_ACTIVE_HOST)
+  )
+    throw new Error("Neural reindexing requires a test Neon host distinct from NEON_ACTIVE_HOST.");
+  const client = new Client({ connectionString });
+  await client.connect();
+  try {
+    const target = await client.query<{ name: string }>("SELECT current_database() AS name");
+    if (target.rows[0]?.name !== process.env.REINDEX_NEURAL_EXPECTED_DATABASE)
+      throw new Error("Refusing neural reindex: current database does not match REINDEX_NEURAL_EXPECTED_DATABASE.");
+    const lock = await client.query<{ locked: boolean }>(
+      "SELECT pg_try_advisory_lock(451395) AS locked",
+    );
+    if (!lock.rows[0]?.locked)
+      throw new Error("A neural reindex is already running for this database.");
+    return await reindexWithClient(client);
+  } finally {
+    try {
+      await client.query("SELECT pg_advisory_unlock(451395)");
+    } catch {
+      // The connection may already be gone; PostgreSQL releases session locks.
+    }
+    await client.end().catch(() => undefined);
+  }
+}
+
+async function reindexWithClient(client: Client) {
   const targetModel = process.env.EMBEDDING_MODEL || "Qwen/Qwen3-Embedding-8B";
   const targetDimensions = Number(process.env.EMBEDDING_DIMENSIONS || 4096);
   const revision = embeddingRevision(targetModel, targetDimensions);
-  const pending = rows.filter(
-    (r) => r.embeddingV2Hash !== revision || !r.hasEmbeddingV2,
-  );
   let indexed = 0;
-  for (let start = 0; start < pending.length; start += 16) {
-    const batch = pending.slice(start, start + 16);
-    const result = await neuralEmbeddings(batch.map((r) => r.content));
+  let total = 0;
+  while (true) {
+    const next = await client.query<Row>(
+      `SELECT c.id,c.content,c."embeddingV2Hash",(c."embeddingV2" IS NOT NULL) AS "hasEmbeddingV2"
+       FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId"
+       WHERE v.active=true AND (c."embeddingV2Hash" IS DISTINCT FROM $1 OR c."embeddingV2" IS NULL)
+       ORDER BY c.id LIMIT 1`,
+      [revision],
+    );
+    if (!next.rows.length) break;
+    const chunk = next.rows[0];
+    total++;
+    // One input per request bounds ambiguous network/connection failures to at
+    // most one potentially repeated billable embedding. Persist before moving on.
+    const result = await neuralEmbeddings([chunk.content]);
     const batchRevision = embeddingRevision(result.model, result.dimensions);
     if (result.model !== targetModel || result.dimensions !== targetDimensions)
       throw new Error(
         "RouterAI embedding model or dimensions differ from configured index.",
       );
-    for (let i = 0; i < batch.length; i++) {
-      await tx.$executeRaw`UPDATE "Chunk" SET "embeddingV2"=${JSON.stringify(result.vectors[i])}::vector,"embeddingV2Hash"=${batchRevision},"embeddingModel"=${result.model},"embeddingDimensions"=${result.dimensions} WHERE id=${batch[i].id}`;
-      indexed++;
-    }
-    console.log(
-      `Neural reindex progress: ${Math.min(start + batch.length, pending.length)}/${pending.length} pending chunks`,
+    const updated = await client.query(
+      `UPDATE "Chunk" c SET "embeddingV2"=$1::vector,"embeddingV2Hash"=$2,"embeddingModel"=$3,"embeddingDimensions"=$4
+       FROM "DocumentVersion" v WHERE c.id=$5 AND c."versionId"=v.id AND v.active=true
+       AND (c."embeddingV2Hash" IS DISTINCT FROM $2 OR c."embeddingV2" IS NULL)`,
+      [JSON.stringify(result.vectors[0]), batchRevision, result.model, result.dimensions, chunk.id],
     );
+    if (updated.rowCount) indexed++;
+    console.log(`Neural reindex progress: saved ${indexed} chunks in this run`);
   }
-  const remaining = await tx.$queryRaw<
-    { count: bigint }[]
-  >`SELECT count(*)::bigint AS count FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" WHERE v.active=true AND (c."embeddingV2Hash" IS DISTINCT FROM ${revision} OR c."embeddingV2" IS NULL)`;
-  if (Number(remaining[0]?.count || 0) !== 0)
+  const result = await client.query<{ total: string; pending: string }>(
+    `SELECT count(*)::text AS total,
+       count(*) FILTER (WHERE c."embeddingV2Hash" IS DISTINCT FROM $1 OR c."embeddingV2" IS NULL)::text AS pending
+     FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" WHERE v.active=true`,
+    [revision],
+  );
+  if (Number(result.rows[0]?.pending || 0) !== 0)
     throw new Error(
       "Neural reindex incomplete; existing vectors have been preserved and the command can be resumed.",
     );
-  return { indexed, total: rows.length };
+  return { indexed, total: Number(result.rows[0]?.total || 0), requests: total };
 }
 export async function importDocument(name: string, text: string) {
   if (!text.trim())
