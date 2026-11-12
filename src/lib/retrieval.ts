@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { Client } from "pg";
+import { indexIncrementally } from "./reindexing";
 import { db } from "./db";
 import { tokens, neuralEmbeddings, embeddingRevision } from "./embeddings";
 import { hash, chunkArticles, bundledKnowledge } from "./knowledge";
@@ -339,36 +340,40 @@ async function reindexWithClient(client: Client) {
   const targetModel = process.env.EMBEDDING_MODEL || "Qwen/Qwen3-Embedding-8B";
   const targetDimensions = Number(process.env.EMBEDDING_DIMENSIONS || 4096);
   const revision = embeddingRevision(targetModel, targetDimensions);
-  let indexed = 0;
-  let total = 0;
-  while (true) {
-    const next = await client.query<Row>(
-      `SELECT c.id,c.content,c."embeddingV2Hash",(c."embeddingV2" IS NOT NULL) AS "hasEmbeddingV2"
+  const progress = await indexIncrementally({
+    next: async () => {
+      const next = await client.query<Row>(
+        `SELECT c.id,c.content,c."embeddingV2Hash",(c."embeddingV2" IS NOT NULL) AS "hasEmbeddingV2"
        FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId"
        WHERE v.active=true AND (c."embeddingV2Hash" IS DISTINCT FROM $1 OR c."embeddingV2" IS NULL)
        ORDER BY c.id LIMIT 1`,
-      [revision],
-    );
-    if (!next.rows.length) break;
-    const chunk = next.rows[0];
-    total++;
-    // One input per request bounds ambiguous network/connection failures to at
-    // most one potentially repeated billable embedding. Persist before moving on.
-    const result = await neuralEmbeddings([chunk.content]);
-    const batchRevision = embeddingRevision(result.model, result.dimensions);
-    if (result.model !== targetModel || result.dimensions !== targetDimensions)
-      throw new Error(
-        "RouterAI embedding model or dimensions differ from configured index.",
+        [revision],
       );
-    const updated = await client.query(
-      `UPDATE "Chunk" c SET "embeddingV2"=$1::vector,"embeddingV2Hash"=$2,"embeddingModel"=$3,"embeddingDimensions"=$4
+      return next.rows[0] || null;
+    },
+    // One input per request bounds ambiguous network/connection failures to at
+    // most one potentially repeated billable embedding.
+    embed: async (chunk) => {
+      const result = await neuralEmbeddings([chunk.content]);
+      if (result.model !== targetModel || result.dimensions !== targetDimensions)
+        throw new Error(
+          "RouterAI embedding model or dimensions differ from configured index.",
+        );
+      return result;
+    },
+    persist: async (chunk, result) => {
+      const batchRevision = embeddingRevision(result.model, result.dimensions);
+      const updated = await client.query(
+        `UPDATE "Chunk" c SET "embeddingV2"=$1::vector,"embeddingV2Hash"=$2,"embeddingModel"=$3,"embeddingDimensions"=$4
        FROM "DocumentVersion" v WHERE c.id=$5 AND c."versionId"=v.id AND v.active=true
        AND (c."embeddingV2Hash" IS DISTINCT FROM $2 OR c."embeddingV2" IS NULL)`,
-      [JSON.stringify(result.vectors[0]), batchRevision, result.model, result.dimensions, chunk.id],
-    );
-    if (updated.rowCount) indexed++;
-    console.log(`Neural reindex progress: saved ${indexed} chunks in this run`);
-  }
+        [JSON.stringify(result.vectors[0]), batchRevision, result.model, result.dimensions, chunk.id],
+      );
+      if (!updated.rowCount)
+        throw new Error(`Chunk ${chunk.id} was no longer active when its vector was saved.`);
+    },
+    onSaved: (saved) => console.log(`Neural reindex progress: saved ${saved} chunks in this run`),
+  });
   const result = await client.query<{ total: string; pending: string }>(
     `SELECT count(*)::text AS total,
        count(*) FILTER (WHERE c."embeddingV2Hash" IS DISTINCT FROM $1 OR c."embeddingV2" IS NULL)::text AS pending
@@ -379,7 +384,7 @@ async function reindexWithClient(client: Client) {
     throw new Error(
       "Neural reindex incomplete; existing vectors have been preserved and the command can be resumed.",
     );
-  return { indexed, total: Number(result.rows[0]?.total || 0), requests: total };
+  return { indexed: progress.saved, total: Number(result.rows[0]?.total || 0), requests: progress.requests };
 }
 export async function importDocument(name: string, text: string) {
   if (!text.trim())
