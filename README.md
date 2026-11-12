@@ -4,7 +4,7 @@
 
 ## Подготовка переноса на Vercel + Neon
 
-Ветка `feat/vercel-migration`: [аудит, архитектура worker, настройка preview, перенос данных и откат](docs/VERCEL_MIGRATION.md). На Vercel пакетные тесты выполняет Workflow; локальный/Railway worker сохранён. Загрузка до 20 МБ передаётся частями через PostgreSQL. Миграции и seed не запускаются во время Vercel build. Действующий Railway этим изменением не переключается.
+Ветка `feat/agentdesk-ui-rag-v2`: аудит Vercel + Neon и переработка RAG-интерфейса. Vercel Workflow выполняет пакетные тесты; Docker Compose предназначен только для локальной разработки. Миграции и seed не запускаются во время Vercel build.
 
 ## Что реализовано
 
@@ -41,7 +41,7 @@ docker compose up -d web
 Откройте <http://localhost:3000>. Для пакетных AI-тестов запустите отдельный
 контейнер worker: `docker compose --profile worker up -d worker`. Если меняли
 исходный код, пересоберите приложение: `docker compose build web worker` и
-перезапустите сервисы. Не используйте пароль Railway.
+перезапустите сервисы. Не используйте production-пароли локально.
 
 Для запуска из Node.js на хосте (Node 24) задайте локально `POSTGRES_PASSWORD`,
 `DATABASE_URL` и пароль демонстрации в `.env.local`. Compose читает переменные отдельно:
@@ -62,10 +62,10 @@ npm run worker
 
 ```sh
 npm run build
-npm run start:railway
+npm start
 ```
 
-`start:railway` запускает веб-сервер и worker, завершает оба при сбое одного; требует БД и пароль. `npm start` запускает только веб-сервер. Живые процессы не переживают перезапуск среды. После рестарта worker помечает оставшийся `running` как `interrupted`; повтор ошибок выполняет только незавершённые/ошибочные пары вопрос/режим. Для MVP поддерживается **одна реплика**, один worker (advisory lock в PostgreSQL).
+`npm start` запускает веб-сервер. В облаке пакетные тесты выполняются через Vercel Workflow. Живые процессы не переживают перезапуск среды. После рестарта worker помечает оставшийся `running` как `interrupted`; повтор ошибок выполняет только незавершённые/ошибочные пары вопрос/режим. Для MVP поддерживается **одна реплика**, один worker (advisory lock в PostgreSQL).
 
 ### RouterAI
 
@@ -82,15 +82,13 @@ npm run start:railway
 
 Для облачного окружения разрешите исходящий HTTPS к `routerai.ru` в его сетевых настройках. Этот PR не публикует среду и не меняет её сетевую политику.
 
-### Локальные embeddings
+### RouterAI neural embeddings
 
-`EMBEDDING_PROVIDER=local`, `EMBEDDING_MODEL=lsa-v1`, `EMBEDDING_DIMENSIONS=256` (пустые значения означают эти defaults). Отдельный адаптер `embed(text[]) -> number[][]` использует TF-IDF, русский Snowball stemming и SVD-проекцию LSA до 64 латентных координат, нормализацию и дополнение нулями до 256. Он обучается **только на текущих документах**, не на вопросах или эталонах. Это реальная локальная латентная семантическая модель, **не предобученная multilingual neural embedding model**; качество перефразировок и обнаружения неизвестных тем ограничено. Внешние веса и embedding API не нужны. Добавление/удаление/изменение документа пересчитывает векторы всего маленького корпуса атомарно; для большого корпуса нужен другой адаптер и отдельный pipeline.
-
-Несовместимый provider/model/dimension вызывает ошибку. Hash адаптера хранится с каждым чанком; поиск отказывается работать с устаревшим индексом. Чанки сохраняют статью, заголовок, section, filename через документ, version checksum, индекс и checksum. Для произвольного документа без AD-KB ID создаётся `DOC-<hash>`; он тоже может цитироваться. Размер чанка — приближение по словам (~2 токена на русское слово), не точный токенизатор модели.
+`EMBEDDING_MODEL` defaults to `qwen/qwen3-embedding-8b`; the endpoint defaults to `https://routerai.ru/api/v1/embeddings`. `EMBEDDING_DIMENSIONS` may pin the expected response size after a one-request probe with `npm run check:embeddings`. The probe reports only endpoint, model, dimension and vector validity. It is a real provider request and may be billable; run it only when authorized. A migration adds a new dimension-flexible vector column and metadata while retaining legacy vectors unchanged. No ANN index is created until the provider dimension is measured. RAG refuses to call the embedding endpoint until every active chunk carries the selected model, measured dimension and matching revision. Do not run `npm run db:seed` or document reindexing before approving embedding usage: both may trigger paid embedding requests.
 
 ### Prisma и миграции
 
-Для установки/сборки native Prisma engine не нужен: `scripts/generate.mjs` вызывает зафиксированный официальный генератор и WASM schema parser. `scripts/migrate.ts` применяет SQL в `prisma/migrations` через `pg`: advisory lock, транзакция на миграцию, checksum уже применённых файлов в `_agentdesk_migrations`. **Не используйте `prisma migrate deploy` для этой БД**: журнал здесь другой. Для изменения схемы обновляйте Prisma schema и добавляйте новую SQL-миграцию; не редактируйте применённые. Не отключайте TLS или проверку целостности пакетов. Для локальной БД нужен `CREATE EXTENSION vector`; на Railway выберите PostgreSQL-образ/шаблон с pgvector и соответствующими правами.
+Для установки/сборки native Prisma engine не нужен: `scripts/generate.mjs` вызывает зафиксированный официальный генератор и WASM schema parser. `scripts/migrate.ts` применяет SQL в `prisma/migrations` через `pg`: advisory lock, транзакция на миграцию, checksum уже применённых файлов в `_agentdesk_migrations`. **Не используйте `prisma migrate deploy` для этой БД**: журнал здесь другой. Для изменения схемы обновляйте Prisma schema и добавляйте новую SQL-миграцию; не редактируйте применённые. Не отключайте TLS или проверку целостности пакетов. Для локальной БД нужен `CREATE EXTENSION vector`; для Neon проверьте наличие pgvector и права на `CREATE EXTENSION vector`.
 
 ## Проверки
 
@@ -115,38 +113,6 @@ Integration/e2e требуют **отдельную тестовую БД**, м�
 `npm run test:retrieval -- --holdout` — отдельная финальная проверка, не использовать результаты для настройки промпта. UI не показывает holdout-эталоны до завершения выбранного прогона; worker никогда не передаёт эталоны в модель. После завершения эталоны доступны для ручной проверки. Для автоматического запуска всех 60 выберите «Все», а для сравнения — «Все 4 режима». Подтвердите до 240 платных запросов; денежный лимит установите у провайдера. При неизвестной цене приложение не может гарантировать денежный бюджет. Остановка не отменяет уже отправленные запросы.
 
 Метрики: retrieval hit@k измеряется на вопросах с источником; корректность отказа — явно обозначенная текстовая эвристика, а не ground truth. Неподтверждённые ID фиксируются до фильтрации. Фактическая точность, полнота цитирования и отсутствие выдуманных утверждений требуют ручной проверки по эталону и источникам. График качества строится только по выставленным оценкам; неизвестные стоимость/качество не рисуются как ноль. Сильная модель не используется как эталон.
-
-## Railway
-
-### Existing project `acceptable-blessing` / `production`
-
-Use the existing `agentdesk-web` service from branch `feat/agentdesk-rag-lab` and the existing `agentdesk-db` service from `pgvector/pgvector:pg17`. The database volume must remain mounted at `/var/lib/postgresql/data` (PostgreSQL 17). Do not create another project or database service. The image will repeatedly restart on an empty volume until `POSTGRES_PASSWORD` is set.
-
-Configure these Railway variables in the service settings; enter secret values only in Railway, never in Git:
-
-| Service         | Variable               | Value                                                                                                                                                                                                                               |
-| --------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `agentdesk-db`  | `POSTGRES_USER`        | `agentdesk`                                                                                                                                                                                                                         |
-| `agentdesk-db`  | `POSTGRES_DB`          | `agentdesk_rag`                                                                                                                                                                                                                     |
-| `agentdesk-db`  | `POSTGRES_PASSWORD`    | New strong random URL-safe secret, such as 32 random hexadecimal bytes, generated and stored in Railway                                                                                                                             |
-| `agentdesk-web` | `DATABASE_URL`         | `postgresql://agentdesk:${{agentdesk-db.POSTGRES_PASSWORD}}@${{agentdesk-db.RAILWAY_PRIVATE_DOMAIN}}:5432/agentdesk_rag` using Railway reference variables; if the password contains reserved URL characters, URL-encode it instead |
-| `agentdesk-web` | `DEMO_ACCESS_PASSWORD` | Separate strong client-facing password                                                                                                                                                                                              |
-| `agentdesk-web` | `BASELINE_MODEL_ID`    | Model ID confirmed in the RouterAI account                                                                                                                                                                                          |
-| `agentdesk-web` | `STRONG_MODEL_ID`      | Second confirmed model ID                                                                                                                                                                                                           |
-| `agentdesk-web` | `ROUTERAI_API_KEY`     | RouterAI key; required only for real LLM calls                                                                                                                                                                                      |
-| `agentdesk-web` | `ROUTERAI_BASE_URL`    | `https://routerai.ru/api/v1`                                                                                                                                                                                                        |
-| `agentdesk-web` | `APP_ORIGIN`           | Final `https://...up.railway.app` origin after creating a public domain; optional before that                                                                                                                                       |
-
-Railway's private-domain and secret reference syntax should be checked in the variable editor before saving `DATABASE_URL`. An alternative is to set `DATABASE_URL` to a Railway-provided database connection reference if it targets the `agentdesk-db` service and includes the intended database name. Never use `POSTGRES_HOST_AUTH_METHOD=trust` for this demo. No database public domain or TCP proxy is required.
-
-The committed `railway.json` requests `npm ci && npm run build`, then runs `npm run db:migrate && npm run db:seed` as the pre-deploy command, and starts both the web process and evaluation worker with `npm run start:railway`. Verify these commands in the service settings if Railway does not pick up the config file. Once the DB reports a healthy start and the web deployment succeeds, create a public HTTPS domain for `agentdesk-web` and set `APP_ORIGIN` to its exact origin. Check `/api/health`: `app=ok`, `database=true`, `indexed=true`; `routerKeyConfigured` reports only key presence. Then test login, offline search for AD-413 and the Team limit, and one authorized real chat request for each configured model. Four-mode paid evaluations require a separate approved request limit.
-
-1. Подключите репозиторий и этот PR после проверки. Приложение и PostgreSQL должны быть отдельными сервисами. Подключите persistent volume PostgreSQL; не используйте эфемерную БД.
-2. Выберите PostgreSQL с pgvector. Задайте приложению приватный `DATABASE_URL`, пароль демо и при необходимости ключ/ID RouterAI. Для внешней БД используйте её корректный TLS/CA, не `rejectUnauthorized:false`.
-3. `railway.json` задаёт сборку, pre-deploy миграции + идемпотентный импорт, старт приложения и worker, health endpoint. Node 24 закреплён в `engines`. `PORT` подставляется Railway. Одна реплика.
-4. Проверьте `/api/health` (БД/индекс, без платных вызовов), вход, доступность статей, RAG-поиск AD-413 и лимита Team. Затем с отдельным разрешением на расход проверьте реальный чат обеих моделей и четыре режима. Только после этого считать публичный деплой проверенным.
-
-В рамках разработки деплой на Railway и публикация облачной среды не выполняются.
 
 ## Ограничения MVP
 

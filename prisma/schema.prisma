@@ -33,6 +33,9 @@ model Chunk {
   checksum String
   embedding Unsupported("vector(256)")?
   embeddingHash String
+  embeddingV2 Unsupported("vector")?
+  embeddingModel String?
+  embeddingDimensions Int?
   @@index([versionId])
 }
 model ChatSession {

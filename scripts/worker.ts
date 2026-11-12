@@ -11,7 +11,7 @@ process.on("SIGINT", () => {
 async function main() {
   if (process.env.EVALUATION_EXECUTOR === "workflow" || process.env.VERCEL)
     throw new Error("Standalone worker is disabled in workflow mode");
-  // One Railway replica: PostgreSQL advisory lock prevents competing workers.
+  // Local worker is for development only; PostgreSQL advisory lock prevents duplicates.
   const pg = await import("pg");
   const lock = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await lock.connect();

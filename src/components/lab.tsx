@@ -864,64 +864,14 @@ export default function Lab() {
                                   .join(", ")}
                               </p>
                             )}
-                            <div
-                              role="tabpanel"
-                              id={`rag-${i}-panel`}
-                              aria-labelledby={`rag-${i}-${ragDiagnosticTab}-tab`}
-                              data-testid="rag-diagnostic-panel"
-                            >
-                              {m.result.mode.endsWith("-plain") ? (
-                                <p data-testid="rag-disabled">
-                                  Поиск по базе знаний отключён.
-                                </p>
-                              ) : (
-                                <>
-                                  {ragDiagnosticTab === "context" && (
-                                    <p className="muted">
-                                      Фрагменты ниже показаны в том порядке, в
-                                      котором они были переданы модели.
-                                    </p>
-                                  )}
-                                  <Sources
-                                    idPrefix={`message-${i}`}
-                                    sources={
-                                      ragDiagnosticTab === "vector"
-                                        ? m.result.retrieval.vectorResults
-                                        : ragDiagnosticTab === "bm25"
-                                          ? m.result.retrieval.bm25Results
-                                          : m.result.llmContext
-                                    }
-                                  />
-                                  {ragDiagnosticTab === "context" &&
-                                    (m.result.retrieval.excludedFromContext
-                                      ?.length ?? 0) > 0 && (
-                                      <details className="source">
-                                        <summary>
-                                          Исключено из контекста (
-                                          {
-                                            m.result.retrieval
-                                              .excludedFromContext?.length
-                                          }
-                                          )
-                                        </summary>
-                                        {m.result.retrieval.excludedFromContext?.map(
-                                          (item) => (
-                                            <p key={item.id}>
-                                              <strong>{item.articleId}</strong>{" "}
-                                              · {item.title} ·{" "}
-                                              {item.reason === "outside_top_k"
-                                                ? "за пределами top-K"
-                                                : item.reason ===
-                                                    "outside_candidate_limit"
-                                                  ? "за пределами лимита кандидатов метода"
-                                                  : "ниже порога релевантности"}
-                                            </p>
-                                          ),
-                                        )}
-                                      </details>
-                                    )}
-                                </>
-                              )}
+                            <div className="rag-diagnostic-grid" data-testid="rag-diagnostic-panel">
+                              {(["vector", "bm25", "context"] as const).map((key) => (
+                                <section key={key} className={`rag-column ${ragDiagnosticTab === key ? "selected" : ""}`}>
+                                  <h4>{key === "vector" ? `Векторный поиск (${m.result!.retrieval.vectorResults.length})` : key === "bm25" ? `BM25 (${m.result!.retrieval.bm25Results.length})` : `Контекст LLM (${m.result!.llmContext.length})`}</h4>
+                                  {key === "context" && <p className="muted">Показаны только фрагменты из фактического запроса модели.</p>}
+                                  {m.result!.mode.endsWith("-plain") ? <p data-testid="rag-disabled">Поиск по базе знаний отключён.</p> : <Sources idPrefix={`message-${i}-${key}`} sources={key === "vector" ? m.result!.retrieval.vectorResults : key === "bm25" ? m.result!.retrieval.bm25Results : m.result!.llmContext} />}
+                                </section>
+                              ))}
                             </div>
                           </details>
                         </>

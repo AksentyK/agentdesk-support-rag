@@ -6,7 +6,7 @@ import {
   bundledKnowledge,
   chunkArticles,
 } from "../src/lib/knowledge";
-import { LocalLSA, cosine } from "../src/lib/embeddings";
+import { LocalLSA, cosine, requestRouterEmbeddings } from "../src/lib/embeddings";
 import { defaults, estimateCost } from "../src/lib/settings";
 import {
   contextForModel,
@@ -54,6 +54,27 @@ test("LSA embeds into finite 256D normalized vectors with semantic projection", 
   assert(Math.abs(cosine(a, b) - 1) < 1e-8);
   assert.equal(cosine(c, c), 0);
 });
+test("RouterAI embedding adapter validates model response and actual dimensions", async () => {
+  const result = await requestRouterEmbeddings(["вопрос", "ответ"], {
+    apiKey: "mock-secret",
+    model: "qwen/qwen3-embedding-8b",
+    fetcher: async (_input, init) => {
+      assert.equal(init?.headers && new Headers(init.headers).get("authorization"), "Bearer mock-secret");
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.model, "qwen/qwen3-embedding-8b");
+      return new Response(JSON.stringify({
+        model: body.model,
+        data: [
+          { index: 1, embedding: [0, 1, 0] },
+          { index: 0, embedding: [1, 0, 0] },
+        ],
+      }), { status: 200 });
+    },
+  });
+  assert.equal(result.dimensions, 3);
+  assert.deepEqual(result.vectors[0], [1, 0, 0]);
+  assert.deepEqual(result.vectors[1], [0, 1, 0]);
+});
 test("dataset has stratified deterministic 48/12 split and isolated unknown questions", async () => {
   const all = await dataset();
   assert.equal(all.length, 60);
@@ -88,20 +109,16 @@ test("BM25 retrieves paraphrased Russian query by stemmed terms", async () => {
   assert(r.bm25Results.length > 0);
   assert(r.bm25Results.some((s) => s.bm25Score! > 0));
 });
-test("hybrid retrieval keeps vector and genuine BM25 rankings independent", async () => {
+test("offline Markdown retrieval uses genuine BM25 without a vector channel", async () => {
   const r = await offlineRetrieve("Что означает AD-413?", defaults());
-  assert(r.vectorResults.length > 0);
+  assert.equal(r.vectorResults.length, 0);
   assert(r.bm25Results.length > 0);
   assert(r.sources.length > 0);
-  assert(r.sources.some((s) => s.vectorRank != null && s.bm25Rank != null));
+  assert(r.sources.every((s) => s.vectorRank == null && s.bm25Rank != null));
 });
 test("hybrid diagnostics expose intersection independently of fused results", async () => {
   const r = await offlineRetrieve("Что означает AD-413?", defaults());
-  assert(r.overlapIds.length > 0);
-  for (const id of r.overlapIds) {
-    assert(r.vectorResults.some((s) => s.id === id));
-    assert(r.bm25Results.some((s) => s.id === id));
-  }
+  assert.deepEqual(r.overlapIds, []);
 });
 test("model context is the exact serialized source payload used by the prompt", async () => {
   const r = await offlineRetrieve("AD-413", defaults());

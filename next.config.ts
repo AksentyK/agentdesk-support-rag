@@ -14,7 +14,10 @@ const config: NextConfig = {
     ],
   },
   poweredByHeader: false,
-  experimental: { cpus: 2 },
+  // Use the TS compiler API instead of spawning tsc --showConfig. The bundled
+  // TypeScript 6 CLI exits successfully with empty stdout under the Vercel
+  // isolated build runner, which makes Next fail to parse its config.
+  experimental: { cpus: 2, useTypeScriptCli: false },
   async headers() {
     return [
       {

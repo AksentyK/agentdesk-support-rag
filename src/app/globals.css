@@ -568,6 +568,25 @@ td.answer {
   cursor: pointer;
   font-size: 12px;
 }
+.rag-diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.rag-column {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper);
+}
+.rag-column h4 { margin: 0 0 8px; }
+@media (max-width: 760px) {
+  .rag-diagnostic-grid { grid-template-columns: 1fr; }
+  .rag-column { display: none; }
+  .rag-column.selected { display: block; }
+}
 .markdown p {
   margin: 8px 0;
   line-height: 1.65;

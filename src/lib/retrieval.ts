@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { db } from "./db";
-import { adapter, cosine, tokens } from "./embeddings";
+import { cosine, tokens, neuralEmbeddings, embeddingRevision } from "./embeddings";
 import { hash, chunkArticles, bundledKnowledge } from "./knowledge";
 import { AppError } from "./errors";
 import type { RetrievalDiagnostics, Settings, Source } from "./types";
@@ -15,11 +15,13 @@ type Row = {
   filename: string;
   version: string;
   embeddingHash: string;
+  embeddingModel?: string | null;
+  embeddingDimensions?: number | null;
 };
 export async function corpus(tx = db()) {
   return tx.$queryRaw<
     Row[]
-  >`SELECT c.id,c."articleId",c.title,c.section,c.content,c.index,c.checksum,c."embeddingHash",d.name AS filename,v.checksum AS version FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE v.active=true ORDER BY d.name,c."articleId",c.index`;
+  >`SELECT c.id,c."articleId",c.title,c.section,c.content,c.index,c.checksum,c."embeddingHash",c."embeddingModel",c."embeddingDimensions",d.name AS filename,v.checksum AS version FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE v.active=true ORDER BY d.name,c."articleId",c.index`;
 }
 export function lexicalScore(query: string, text: string) {
   const qt = [...new Set(tokens(query))],
@@ -189,20 +191,29 @@ export async function retrieve(query: string, s: Settings) {
       const rows = await corpus(tx as unknown as ReturnType<typeof db>);
       if (!rows.length)
         throw new AppError(409, "Индекс пуст. Импортируйте базу знаний.");
-      const model = adapter(rows.map((r) => r.content));
-      if (rows.some((r) => r.embeddingHash !== model.hash))
+      const configuredModel = process.env.EMBEDDING_MODEL || "qwen/qwen3-embedding-8b";
+      const dimensions = Number(process.env.EMBEDDING_DIMENSIONS || rows[0].embeddingDimensions || 0);
+      if (!dimensions || rows.some((r) =>
+        r.embeddingModel !== configuredModel ||
+        r.embeddingDimensions !== dimensions ||
+        r.embeddingHash !== embeddingRevision(configuredModel, dimensions)
+      ))
+        throw new AppError(409, "Нейросетевой индекс не готов. Сначала выполните явную переиндексацию.");
+      const queryEmbedding = await neuralEmbeddings([query]);
+      const revision = embeddingRevision(queryEmbedding.model, queryEmbedding.dimensions);
+      if (queryEmbedding.model !== configuredModel || queryEmbedding.dimensions !== dimensions || rows.some((r) => r.embeddingHash !== revision))
         throw new AppError(
           409,
-          "Индекс требует переиндексации: версия embedding-адаптера изменилась.",
+          "Нейросетевой индекс отсутствует или требует переиндексации.",
         );
-      const vector = JSON.stringify(model.embed([query])[0]);
+      const vector = JSON.stringify(queryEmbedding.vectors[0]);
       const candidates = await tx.$queryRaw<
         (Row & { semantic: number })[]
       >(Prisma.sql`
- SELECT c.id,c."articleId",c.title,c.section,c.content,c.index,c.checksum,c."embeddingHash",d.name AS filename,v.checksum AS version,1-(c.embedding <=> ${vector}::vector) AS semantic
- FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE v.active=true`);
+ SELECT c.id,c."articleId",c.title,c.section,c.content,c.index,c.checksum,c."embeddingHash",d.name AS filename,v.checksum AS version,1-(c."embeddingV2" <=> ${vector}::vector) AS semantic
+ FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId" JOIN "Document" d ON d.id=v."documentId" WHERE v.active=true AND c."embeddingModel"=${queryEmbedding.model} AND c."embeddingDimensions"=${queryEmbedding.dimensions} AND c."embeddingHash"=${revision} AND c."embeddingV2" IS NOT NULL`);
       const ranked = hybridRank(query, candidates, s);
-      return { ...ranked, indexHash: model.hash };
+      return { ...ranked, indexHash: revision };
     },
     { isolationLevel: "RepeatableRead", timeout: 30000 },
   );
@@ -210,30 +221,51 @@ export async function retrieve(query: string, s: Settings) {
 export async function offlineRetrieve(query: string, s: Settings) {
   const text = await bundledKnowledge(),
     chunks = chunkArticles(text),
-    model = adapter(chunks.map((c) => c.content));
-  const queryVector = model.embed([query])[0],
-    vectors = model.embed(chunks.map((c) => c.content));
-  const ranked = hybridRank(
-    query,
-    chunks.map((c, i) => ({
+    rows = chunks.map((c) => ({
       ...c,
       id: c.checksum,
       filename: "AgentDesk_Knowledge.md",
       version: hash(text),
-      embeddingHash: model.hash,
-      semantic: cosine(queryVector, vectors[i]),
-    })),
-    s,
-  );
-  return { ...ranked, ...ranked.diagnostics, indexHash: model.hash };
+      embeddingHash: "markdown-bm25-only",
+    }));
+  const bm25 = bm25Rank(query, rows, Math.max(1, s.topK));
+  const bm25Results = bm25.map((row, i) => ({
+    ...row,
+    score: row.bm25Score,
+    bm25Rank: i + 1,
+    vectorScore: null,
+    vectorRank: null,
+    position: i + 1,
+  }));
+  const ids = new Set(bm25Results.map((row) => row.id));
+  return {
+    sources: bm25Results,
+    vectorResults: [],
+    bm25Results,
+    overlapIds: [],
+    excludedFromContext: rows
+      .filter((row) => !ids.has(row.id))
+      .map((row) => ({
+        id: row.id,
+        articleId: row.articleId,
+        title: row.title,
+        reason: "below_relevance_threshold" as const,
+      })),
+    diagnostics: { vectorResults: [], bm25Results, overlapIds: [], excludedFromContext: [] },
+    indexHash: hash("markdown-bm25-v1:" + text),
+  };
 }
 export async function reindexAll(tx = db()) {
   const rows = await corpus(tx);
   if (!rows.length) return;
-  const model = adapter(rows.map((r) => r.content)),
-    vectors = model.embed(rows.map((r) => r.content));
-  for (let i = 0; i < rows.length; i++)
-    await tx.$executeRaw`UPDATE "Chunk" SET embedding=${JSON.stringify(vectors[i])}::vector,"embeddingHash"=${model.hash} WHERE id=${rows[i].id}`;
+  const modelName = process.env.EMBEDDING_MODEL || "qwen/qwen3-embedding-8b";
+  for (let start = 0; start < rows.length; start += 32) {
+    const batch = rows.slice(start, start + 32);
+    const result = await neuralEmbeddings(batch.map((r) => r.content));
+    const revision = embeddingRevision(result.model, result.dimensions);
+    for (let i = 0; i < batch.length; i++)
+      await tx.$executeRaw`UPDATE "Chunk" SET "embeddingV2"=${JSON.stringify(result.vectors[i])}::vector,"embeddingModel"=${result.model},"embeddingDimensions"=${result.dimensions},"embeddingHash"=${revision} WHERE id=${batch[i].id}`;
+  }
 }
 export async function importDocument(name: string, text: string) {
   if (!text.trim())
