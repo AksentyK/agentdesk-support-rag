@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --env-file-if-exists=.env.local --import tsx --test tests/*.test.ts",
     "db:migrate": "node --env-file-if-exists=.env.local --import tsx scripts/migrate.ts",
+    "db:migrate:test-neon": "MIGRATION_TARGET=neon-test node --env-file-if-exists=.env.test-neon --import tsx scripts/migrate.ts",
     "db:seed": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts",
     "check:embeddings": "node --env-file-if-exists=.env.local --import tsx scripts/check-embeddings.ts",
     "db:reindex-neural": "node --env-file-if-exists=.env.local --import tsx scripts/reindex-neural.ts",
