@@ -9,7 +9,7 @@ import {
   sessionOwner,
   rateLimit,
 } from "@/lib/auth";
-import { settings, settingsSchema } from "@/lib/settings";
+import { settings, settingsSchema, defaults } from "@/lib/settings";
 import { catalog, validateModels, answer } from "@/lib/router";
 import { bundledKnowledge, articles } from "@/lib/knowledge";
 import {
@@ -21,10 +21,23 @@ import {
 } from "@/lib/retrieval";
 import { extract } from "@/lib/documents";
 import { dataset } from "@/lib/dataset";
+import { start } from "workflow/api";
+import { evaluationWorkflow } from "@/workflows/evaluation";
+import {
+  reconcileStaleRuns,
+  interruptWorkflowRun,
+} from "@/lib/evaluation-batches";
+import {
+  beginUpload,
+  putUploadPart,
+  finishUpload,
+  UPLOAD_PART_SIZE,
+} from "@/lib/uploads";
 import { createRun, csv } from "@/lib/evaluation";
 import { modelReadiness, checkStartupModels } from "@/lib/readiness";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 const json = (data: unknown, status = 200) =>
   NextResponse.json(data, { status, headers: { "Cache-Control": "no-store" } });
 async function bounded(req: NextRequest, max: number) {
@@ -142,12 +155,39 @@ async function handler(req: NextRequest) {
           : "Production заблокирован: задайте DEMO_ACCESS_PASSWORD.",
       );
     if (method !== "GET") await rateLimit("mutations:" + owner, 60);
-    if (path === "settings" && method === "GET")
+    if (path.startsWith("evaluation/") || path.startsWith("documents"))
+      await reconcileStaleRuns();
+    if (path === "documents/uploads" && method === "POST")
+      return json(await beginUpload(owner, await body(req)), 201);
+    const uploadMatch = path.match(
+      /^documents\/uploads\/([^/]+)\/(\d+|complete)$/,
+    );
+    if (uploadMatch && method === "PUT" && uploadMatch[2] !== "complete") {
+      await putUploadPart(
+        uploadMatch[1],
+        owner,
+        Number(uploadMatch[2]),
+        await bounded(req, UPLOAD_PART_SIZE),
+      );
+      return json({ ok: true });
+    }
+    if (uploadMatch && method === "POST" && uploadMatch[2] === "complete")
+      return json(await finishUpload(uploadMatch[1], owner));
+    if (path === "settings" && method === "GET") {
+      let configured = Boolean(process.env.DATABASE_URL);
+      let current = defaults();
+      try {
+        current = await settings();
+      } catch {
+        // Keep the standalone Markdown BM25 search usable during DB outages.
+        configured = false;
+      }
       return json({
-        settings: await settings(),
+        settings: current,
         keyConfigured: Boolean(process.env.ROUTERAI_API_KEY),
-        databaseConfigured: Boolean(process.env.DATABASE_URL),
+        databaseConfigured: configured,
       });
+    }
     if (path === "settings" && method === "PUT") {
       const s = settingsSchema.parse(await body(req));
       if (s.baseline || s.strong) await validateModels(s);
@@ -170,12 +210,70 @@ async function handler(req: NextRequest) {
           offline: z.boolean().default(false),
         })
         .parse(await body(req));
-      const s = await settings();
       return json(
         await (data.offline
-          ? offlineRetrieve(data.question, s)
-          : retrieve(data.question, s)),
+          ? offlineRetrieve(data.question, defaults())
+          : retrieve(data.question, await settings())),
       );
+    }
+    if (path === "chat/sessions" && method === "GET") {
+      const rows = await db().chatSession.findMany({
+        where: { owner },
+        take: 50,
+        select: {
+          id: true,
+          createdAt: true,
+          messages: {
+            orderBy: { createdAt: "desc" },
+            take: 2,
+            select: { role: true, content: true, createdAt: true },
+          },
+        },
+      });
+      return json({
+        sessions: rows
+          .map((row) => ({
+            id: row.id,
+            createdAt: row.createdAt,
+            preview:
+              row.messages.find((message) => message.role === "user")
+                ?.content ||
+              row.messages[0]?.content ||
+              "Новый диалог",
+            lastMessageAt: row.messages[0]?.createdAt || row.createdAt,
+          }))
+          .sort(
+            (a, b) => b.lastMessageAt.getTime() - a.lastMessageAt.getTime(),
+          ),
+      });
+    }
+    const savedChat = path.match(/^chat\/sessions\/([0-9a-f-]{36})$/i);
+    if (savedChat && method === "GET") {
+      const session = await db().chatSession.findFirst({
+        where: { id: savedChat[1], owner },
+        include: {
+          messages: {
+            orderBy: { createdAt: "asc" },
+            // Keep response size bounded while restoring ten question/answer turns.
+            take: 20,
+            select: {
+              role: true,
+              content: true,
+              diagnostics: true,
+              createdAt: true,
+            },
+          },
+        },
+      });
+      if (!session) throw new AppError(404, "Сохранённый диалог не найден.");
+      return json({
+        id: session.id,
+        messages: session.messages.map((message) => ({
+          role: message.role,
+          text: message.content,
+          result: message.diagnostics,
+        })),
+      });
     }
     if (path === "chat" && method === "POST") {
       await rateLimit("chat:" + owner, 20);
@@ -237,7 +335,12 @@ async function handler(req: NextRequest) {
           include: {
             versions: {
               where: { active: true },
-              include: { _count: { select: { chunks: true } } },
+              select: {
+                id: true,
+                checksum: true,
+                createdAt: true,
+                _count: { select: { chunks: true } },
+              },
             },
           },
           orderBy: { createdAt: "desc" },
@@ -277,14 +380,19 @@ async function handler(req: NextRequest) {
       });
       if (!doc) throw new AppError(404, "Документ не найден.");
       if (method === "GET") return json(doc);
-      if (method === "POST" && docMatch[2])
-        return json(await importDocument(doc.name, doc.versions[0].text));
+      if (method === "POST" && docMatch[2]) {
+        const confirmation = z
+          .object({ confirmPaid: z.literal(true) })
+          .parse(await body(req));
+        if (!confirmation.confirmPaid)
+          throw new AppError(400, "Подтвердите платную индексацию.");
+        return json(await reindexAll());
+      }
       if (method === "DELETE") {
         await db().$transaction(
           async (tx) => {
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(451392)`;
             await tx.document.delete({ where: { id: doc.id } });
-            await reindexAll(tx as unknown as ReturnType<typeof db>);
           },
           { timeout: 120000 },
         );
@@ -350,7 +458,21 @@ async function handler(req: NextRequest) {
         data.maxRequests,
         data.retryId,
       );
-      const { snapshot, ...safe } = created;
+      if (created.executor === "workflow") {
+        try {
+          await start(evaluationWorkflow, [created.id]);
+        } catch {
+          // An ambiguous dispatch is stopped; a new, explicitly confirmed run can retry.
+          await interruptWorkflowRun(created.id);
+          throw new AppError(
+            503,
+            "Не удалось запустить тест. Проверьте историю и повторите запуск.",
+          );
+        }
+      }
+      const { snapshot, leaseToken, leaseExpiresAt, ...safe } = created;
+      void leaseToken;
+      void leaseExpiresAt;
       void snapshot;
       return json(safe, 201);
     }
@@ -409,7 +531,9 @@ async function handler(req: NextRequest) {
           },
         );
       // Reference answers remain server-side; completed holdout results can be reviewed, never inserted in prompts.
-      const { snapshot, ...safe } = run;
+      const { snapshot, leaseToken, leaseExpiresAt, ...safe } = run;
+      void leaseToken;
+      void leaseExpiresAt;
       void snapshot;
       const references = ["completed", "completed-with-errors"].includes(
         run.status,

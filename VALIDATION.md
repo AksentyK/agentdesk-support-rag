@@ -1,3 +1,22 @@
+# Vercel migration validation — 2026-11-03
+
+Validated in a new managed environment against current main `1727f0851c56a66758e5b4963dc5c8952584d235`, using an isolated local PostgreSQL 17/pgvector container. Railway, its database and deployment configuration were not changed. No Vercel/Neon account, deployment or paid service was provisioned.
+
+- `npm run typecheck` and `npm run build`: passed with Next.js 16.4.3, Prisma 7.10.1 and Workflow SDK 5.3.0. Build runs without a database or RouterAI credentials.
+- `npm test`: **17 passed, 0 failed, 0 skipped** with the isolated database. Includes all 240 question/mode combinations against mock RouterAI, duplicate batch delivery without duplicate AI requests, atomic progress, cancellation, stale/uncertain leases, explicit partial retry, upload ownership/expiry/part validation, a 5.1 MB file, and real PDF/DOCX extraction.
+- `npm run test:bundle`: passed. API trace **76 MiB**, Workflow trace **75 MiB**, below the standard 250 MB limit. Both include all knowledge/test data. PDF/DOCX parsers work in an isolated temporary directory containing only traced dependencies; PDF.js worker and native canvas are explicitly included.
+- `E2E_EXECUTOR=workflow npm run test:e2e`: **3 passed** in Chromium against the production build, with no standalone worker. Includes a complete 60-question run after closing the browser tab and reopening the app, plus password/CSRF, large chunked upload/delete, persisted evaluation/CSV visibility and mobile search.
+- `npm run test:e2e`: **2 passed, 1 intentionally skipped** (the Workflow-only tab-closure test), against the preserved standalone worker path. Large chunked upload also passes in this mode.
+- `npm run test:retrieval` and `npm run test:retrieval:db`: passed; all 60 database operations completed. Source hits unchanged: dev 38/42, holdout 10/10. All 8 out-of-scope questions still retrieve fragments. These are existing false positives; no prompt or retrieval tuning was performed.
+- Additive migration tested on a restored copy of the **original schema**, populated with local application data: all 11 original tables matched by count and row SHA-256 after upgrade, including 35 chunks, 60 questions, 16 runs and 940 results. A deliberately removed test question in the isolated target was detected, returning exit code 1. The source and production Railway were not modified by this verification.
+- Git diff confirms the original Markdown, PDF, JSON/CSV/XLSX datasets, initial migration, `railway.json` and Railway startup script are unchanged.
+
+Unverified until an approved preview exists: Vercel deployment/queue delivery, Neon pooled TLS and database extension permissions, RouterAI reachability/model availability from the selected region, actual full production database transfer, plan quotas and paid inference. Local World demonstrates the Workflow HTTP integration but does not reproduce every Vercel platform behavior. The existing retrieval accuracy limitations remain. No real paid model calls were made.
+
+See [audit and migration runbook](docs/VERCEL_MIGRATION.md). The historical report below belongs to the original implementation and is retained for context; GitHub CI status is reported separately on the migration PR.
+
+---
+
 # Validation — 2026-10-30
 
 Validated locally in the managed development machine; Railway was not deployed.

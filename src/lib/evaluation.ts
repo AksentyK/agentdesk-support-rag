@@ -89,6 +89,7 @@ export async function createRun(
       400,
       `Нужно подтвердить лимит минимум ${snapshot.tasks.length} запросов. Фактическая стоимость зависит от провайдера.`,
     );
+  const executor = evaluationExecutor();
   return db().$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(451395)`;
     const active = await tx.evaluationRun.count({
@@ -102,6 +103,9 @@ export async function createRun(
     const row = await tx.evaluationRun.create({
       data: {
         owner,
+        executor,
+        leaseExpiresAt:
+          executor === "workflow" ? new Date(Date.now() + 600000) : null,
         split,
         kind,
         status: "queued",
@@ -114,7 +118,21 @@ export async function createRun(
     return row;
   });
 }
-export async function executeRun(id: string) {
+export function evaluationExecutor() {
+  const executor =
+    process.env.EVALUATION_EXECUTOR ||
+    (process.env.VERCEL ? "workflow" : "worker");
+  if (
+    !["worker", "workflow"].includes(executor) ||
+    (process.env.VERCEL && executor !== "workflow")
+  )
+    throw new AppError(503, "Некорректная настройка исполнителя тестов.");
+  return executor;
+}
+export async function executeRun(
+  id: string,
+  options?: { oneBatch: true; leaseToken: string },
+) {
   const run = await db().evaluationRun.findUniqueOrThrow({ where: { id } }),
     snapshot = run.snapshot as unknown as Snapshot;
   // A run is tied to one immutable corpus. Abort if documents change mid-run.
@@ -143,6 +161,11 @@ export async function executeRun(id: string) {
       const fresh = await db().evaluationRun.findUniqueOrThrow({
         where: { id },
       });
+      if (
+        options &&
+        (fresh.leaseToken !== options.leaseToken || fresh.status !== "running")
+      )
+        return false;
       if (fresh.cancelled) {
         await db().evaluationRun.update({
           where: { id },
@@ -190,32 +213,61 @@ export async function executeRun(id: string) {
             status = "error";
             result = { error: publicError(e).error, question: c.question };
           }
-          await db().evaluationResult.create({
-            data: {
-              runId: id,
-              caseId: c.id,
-              mode: task.mode,
-              status,
-              result: result as Prisma.InputJsonValue,
-            },
-          });
-          await db().evaluationRun.update({
-            where: { id },
-            data: { completed: { increment: 1 } },
+          // Commit the result and progress together. A lost lease cannot write late results.
+          await db().$transaction(async (tx) => {
+            const updated = await tx.evaluationRun.updateMany({
+              where: {
+                id,
+                ...(options
+                  ? { leaseToken: options.leaseToken, status: "running" }
+                  : {}),
+              },
+              data: { completed: { increment: 1 } },
+            });
+            if (!updated.count)
+              throw new AppError(409, "Исполнение теста прервано.");
+            await tx.evaluationResult.create({
+              data: {
+                runId: id,
+                caseId: c.id,
+                mode: task.mode,
+                status,
+                result: result as Prisma.InputJsonValue,
+              },
+            });
           });
         }),
       );
+      if (options?.oneBatch && i + concurrency < tasks.length) return true;
     }
     const errors = await db().evaluationResult.count({
       where: { runId: id, status: "error" },
     });
-    await db().evaluationRun.update({
-      where: { id },
-      data: { status: errors ? "completed-with-errors" : "completed" },
+    const fresh = await db().evaluationRun.findUniqueOrThrow({ where: { id } });
+    await db().evaluationRun.updateMany({
+      where: {
+        id,
+        ...(options
+          ? { leaseToken: options.leaseToken, status: "running" }
+          : {}),
+      },
+      data: {
+        status: fresh.cancelled
+          ? "cancelled"
+          : errors
+            ? "completed-with-errors"
+            : "completed",
+      },
     });
+    return false;
   } catch (e) {
-    await db().evaluationRun.update({
-      where: { id },
+    await db().evaluationRun.updateMany({
+      where: {
+        id,
+        ...(options
+          ? { leaseToken: options.leaseToken, status: "running" }
+          : {}),
+      },
       data: { status: "interrupted" },
     });
     throw e;

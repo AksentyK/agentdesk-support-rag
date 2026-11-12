@@ -33,5 +33,10 @@ jobs:
       - run: npm run db:migrate && npm run db:seed
       - run: npm run typecheck && npm test
       - run: npm run build
+      - run: npm run test:bundle
       - run: npx playwright install --with-deps chromium
+      - run: npm run test:retrieval:db
       - run: npm run test:e2e
+      - run: npm run test:e2e
+        env:
+          E2E_EXECUTOR: workflow
