@@ -13,8 +13,8 @@ async function main() {
     throw new Error(
       "Set REINDEX_NEURAL_CONFIRM=YES after confirming target database and API spend.",
     );
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("DATABASE_URL is required.");
+  const url = process.env.DIRECT_URL;
+  if (!url) throw new Error("DIRECT_URL is required for neural reindexing.");
   const parsed = new URL(url);
   if (
     parsed.hostname.includes("-pooler.") ||
@@ -23,6 +23,15 @@ async function main() {
     throw new Error(
       "Reindex requires the verified Neon direct URL; pooled or non-Neon URLs are rejected.",
     );
+  if (!process.env.REINDEX_NEURAL_EXPECTED_HOST)
+    throw new Error(
+      "Set REINDEX_NEURAL_EXPECTED_HOST to the exact direct Neon hostname shown in the dashboard.",
+    );
+  if (parsed.hostname !== process.env.REINDEX_NEURAL_EXPECTED_HOST)
+    throw new Error(
+      "Refusing to reindex: DIRECT_URL host does not match REINDEX_NEURAL_EXPECTED_HOST.",
+    );
+  process.env.DATABASE_URL = url;
   client = db();
   const target = await client.$queryRaw<
     { name: string }[]
@@ -32,7 +41,7 @@ async function main() {
       "Refusing to reindex: current database is not agentdesk_rag.",
     );
   console.log(
-    `Target database verified: ${target[0].name}. Only chunks missing the configured embedding revision will be requested.`,
+    `Target database verified: ${target[0].name} on ${parsed.hostname}. Only chunks missing the configured embedding revision will be requested.`,
   );
   const result = await reindexAll(client);
   console.log(
