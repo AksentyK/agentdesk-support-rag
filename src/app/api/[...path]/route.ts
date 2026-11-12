@@ -380,14 +380,19 @@ async function handler(req: NextRequest) {
       });
       if (!doc) throw new AppError(404, "Документ не найден.");
       if (method === "GET") return json(doc);
-      if (method === "POST" && docMatch[2])
-        return json(await importDocument(doc.name, doc.versions[0].text));
+      if (method === "POST" && docMatch[2]) {
+        const confirmation = z
+          .object({ confirmPaid: z.literal(true) })
+          .parse(await body(req));
+        if (!confirmation.confirmPaid)
+          throw new AppError(400, "Подтвердите платную индексацию.");
+        return json(await reindexAll());
+      }
       if (method === "DELETE") {
         await db().$transaction(
           async (tx) => {
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(451392)`;
             await tx.document.delete({ where: { id: doc.id } });
-            await reindexAll(tx as unknown as ReturnType<typeof db>);
           },
           { timeout: 120000 },
         );
