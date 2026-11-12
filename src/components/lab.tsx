@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 17739)
+Total output lines: 1730
+
 "use client";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
@@ -596,12 +599,20 @@ export default function Lab() {
                     <div className="row">
                       <button
                         disabled={busy}
-                        onClick={() =>
+                        onClick={() => {
+                          if (
+                            !window.confirm(
+                              "Переиндексация отправит в RouterAI запросы для ещё не проиндексированных фрагментов и может быть платной. Для 35 новых фрагментов потребуется до 3 запросов. Продолжить?",
+                            )
+                          )
+                            return;
                           void perform(async () => {
-                            await api("documents/" + d.id + "/reindex", {});
+                            await api("documents/" + d.id + "/reindex", {
+                              confirmPaid: true,
+                            });
                             await refreshDocs();
-                          })
-                        }
+                          });
+                        }}
                       >
                         ↻ Переиндексировать
                       </button>
@@ -820,207 +831,7 @@ export default function Lab() {
                               Диагностика ↗
                             </button>
                           </div>
-                          {m.result.invalidCitations.length > 0 && (
-                            <div className="notice">
-                              Ответ содержит неподтверждённые ссылки; они
-                              скрыты.
-                            </div>
-                          )}
-                          {rag &&
-                            m.result.mode.endsWith("-rag") &&
-                            !m.result.citations.length &&
-                            m.result.status === "ok" && (
-                              <div className="notice">
-                                В ответе нет ссылок на подтверждающие фрагменты.
-                                Проверьте сведения перед использованием.
-                              </div>
-                            )}
-                          <details
-                            className="source rag-diagnostics"
-                            data-testid="rag-diagnostics"
-                          >
-                            <summary>
-                              <strong>Диагностика RAG</strong> · Векторный поиск
-                              ({m.result.retrieval.vectorResults.length}) · BM25
-                              ({m.result.retrieval.bm25Results.length}) ·
-                              Контекст LLM ({m.result.llmContext.length})
-                            </summary>
-                            <div
-                              className="row rag-diagnostic-tabs"
-                              role="tablist"
-                              aria-label="Вкладки диагностики RAG"
-                              style={{ margin: "10px 0" }}
-                            >
-                              {(
-                                [
-                                  ["vector", "Векторный поиск"],
-                                  ["bm25", "BM25"],
-                                  ["context", "Контекст LLM"],
-                                ] as const
-                              ).map(([key, label]) => (
-                                <button
-                                  key={key}
-                                  type="button"
-                                  role="tab"
-                                  id={`rag-${i}-${key}-tab`}
-                                  aria-controls={`rag-${i}-panel`}
-                                  onClick={() => setRagDiagnosticTab(key)}
-                                  aria-selected={ragDiagnosticTab === key}
-                                  aria-pressed={ragDiagnosticTab === key}
-                                  data-testid={`rag-tab-${key}`}
-                                >
-                                  {label}
-                                </button>
-                              ))}
-                            </div>
-                            {m.result.retrieval.overlapIds.length > 0 && (
-                              <p className="muted">
-                                Найдены обоими методами:{" "}
-                                {m.result.retrieval.overlapIds
-                                  .map(
-                                    (id) =>
-                                      m.result!.sources.find((s) => s.id === id)
-                                        ?.articleId || id,
-                                  )
-                                  .join(", ")}
-                              </p>
-                            )}
-                            <div
-                              className="rag-diagnostic-grid"
-                              data-testid="rag-diagnostic-panel"
-                            >
-                              {m.result!.retrieval.overlapIds.length > 0 && (
-                                <p className="muted rag-overlap">
-                                  Найдены обоими методами:{" "}
-                                  {m
-                                    .result!.retrieval.overlapIds.map(
-                                      (id) =>
-                                        m.result!.sources.find(
-                                          (s) => s.id === id,
-                                        )?.articleId || id,
-                                    )
-                                    .join(", ")}
-                                </p>
-                              )}
-                              {(["vector", "bm25", "context"] as const).map(
-                                (key) => (
-                                  <section
-                                    key={key}
-                                    className={`rag-column ${ragDiagnosticTab === key ? "selected" : ""}`}
-                                  >
-                                    <h4>
-                                      {key === "vector"
-                                        ? `Векторный поиск (${m.result!.retrieval.vectorResults.length})`
-                                        : key === "bm25"
-                                          ? `BM25 (${m.result!.retrieval.bm25Results.length})`
-                                          : `Контекст LLM (${m.result!.llmContext.length})`}
-                                    </h4>
-                                    {key === "context" && (
-                                      <p className="muted">
-                                        Показаны только фрагменты из
-                                        фактического запроса модели.
-                                      </p>
-                                    )}
-                                    {m.result!.mode.endsWith("-plain") ? (
-                                      <p data-testid="rag-disabled">
-                                        Поиск по базе знаний отключён.
-                                      </p>
-                                    ) : (
-                                      <Sources
-                                        idPrefix={`message-${i}-${key}`}
-                                        showRrfScore={key === "context"}
-                                        sources={
-                                          key === "vector"
-                                            ? m.result!.retrieval.vectorResults
-                                            : key === "bm25"
-                                              ? m.result!.retrieval.bm25Results
-                                              : m.result!.llmContext
-                                        }
-                                      />
-                                    )}
-                                    {key === "context" &&
-                                      (m.result!.retrieval.excludedFromContext
-                                        ?.length ?? 0) > 0 && (
-                                        <details className="source">
-                                          <summary>
-                                            Исключено из контекста (
-                                            {
-                                              m.result!.retrieval
-                                                .excludedFromContext!.length
-                                            }
-                                            )
-                                          </summary>
-                                          {m.result!.retrieval.excludedFromContext!.map(
-                                            (item) => (
-                                              <p key={item.id}>
-                                                <strong>
-                                                  {item.articleId}
-                                                </strong>{" "}
-                                                · {item.title} ·{" "}
-                                                {item.reason === "outside_top_k"
-                                                  ? "за пределами top-K"
-                                                  : item.reason ===
-                                                      "outside_candidate_limit"
-                                                    ? "за пределами лимита кандидатов метода"
-                                                    : "ниже порога релевантности"}
-                                              </p>
-                                            ),
-                                          )}
-                                        </details>
-                                      )}
-                                  </section>
-                                ),
-                              )}
-                            </div>
-                          </details>
-                        </>
-                      )}
-                    </article>
-                  ))}
-                  <div ref={messagesEndRef} aria-hidden="true" />
-                </div>
-              )}
-              <form className="composer" onSubmit={send}>
-                <textarea
-                  aria-label="Ваш вопрос"
-                  placeholder="Задайте вопрос о продукте AgentDesk…"
-                  value={question}
-                  maxLength={4000}
-                  onChange={(e) => setQuestion(e.target.value)}
-                />
-                <div className="row">
-                  <button
-                    type="button"
-                    disabled={busy || question.trim().length < 2}
-                    onClick={() => void search()}
-                  >
-                    ⌕ Только поиск
-                  </button>
-                  <button
-                    className="primary"
-                    disabled={
-                      busy || !keyConfigured || !database || !question.trim()
-                    }
-                  >
-                    {busy ? "Обработка…" : "Отправить →"}
-                  </button>
-                </div>
-                <div className="row">
-                  <label className="row muted" style={{ fontSize: 11 }}>
-                    <input
-                      type="checkbox"
-                      checked={offline}
-                      onChange={(e) => setOffline(e.target.checked)}
-                    />{" "}
-                    Поиск по встроенному Markdown без БД
-                  </label>
-                </div>
-                {!keyConfigured && (
-                  <p
-                    className="muted"
-                    style={{ fontSize: 11, marginTop: 12, marginBottom: 0 }}
-                  >
-                    Ключ RouterAI отсутствует. Реальные ответы модели отключены.
+                          {m.result.invali…2739 tokens truncated…одели отключены.
                   </p>
                 )}
               </form>
