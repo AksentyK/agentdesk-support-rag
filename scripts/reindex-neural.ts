@@ -1,6 +1,4 @@
-import { db } from "../src/lib/db";
 import { reindexAll } from "../src/lib/retrieval";
-let client: ReturnType<typeof db> | undefined;
 
 async function main() {
   if (!process.argv.includes("--execute")) {
@@ -31,21 +29,39 @@ async function main() {
     throw new Error(
       "Refusing to reindex: DIRECT_URL host does not match REINDEX_NEURAL_EXPECTED_HOST.",
     );
-  process.env.DATABASE_URL = url;
-  client = db();
-  const target = await client.$queryRaw<
-    { name: string }[]
-  >`SELECT current_database() AS name`;
-  if (target[0]?.name !== "agentdesk_rag")
+  if (!process.env.REINDEX_NEURAL_EXPECTED_DATABASE)
     throw new Error(
-      "Refusing to reindex: current database is not agentdesk_rag.",
+      "Set REINDEX_NEURAL_EXPECTED_DATABASE to the exact database name shown by Neon.",
+    );
+  if (process.env.REINDEX_NEURAL_EXPECTED_DATABASE === "agentdesk_rag") {
+    if (!process.env.NEON_ACTIVE_HOST)
+      throw new Error("Set NEON_ACTIVE_HOST so the test branch host can be distinguished from the active Neon branch.");
+    if (parsed.hostname === process.env.NEON_ACTIVE_HOST)
+      throw new Error("Refusing neural reindex: target host matches the active Neon branch.");
+  }
+  const { Client } = await import("pg");
+  const guard = new Client({ connectionString: url });
+  await guard.connect();
+  let targetName: string;
+  try {
+    const target = await guard.query<{ name: string }>(
+      "SELECT current_database() AS name",
+    );
+    targetName = target.rows[0]?.name;
+  } finally {
+    await guard.end();
+  }
+  if (targetName !== process.env.REINDEX_NEURAL_EXPECTED_DATABASE)
+    throw new Error(
+      "Refusing to reindex: current database does not match REINDEX_NEURAL_EXPECTED_DATABASE.",
     );
   console.log(
-    `Target database verified: ${target[0].name} on ${parsed.hostname}. Only chunks missing the configured embedding revision will be requested.`,
+    `Target database verified: ${targetName} on ${parsed.hostname}. Existing active-indexed chunks will be skipped.`,
   );
-  const result = await reindexAll(client);
+  process.env.DATABASE_URL = url;
+  const result = await reindexAll();
   console.log(
-    `Neural reindex complete: ${result.indexed}/${result.total} chunks indexed.`,
+    `Neural reindex complete: ${result.indexed}/${result.total} chunks indexed; ${result.requests} embedding requests made this run.`,
   );
 }
 
@@ -56,4 +72,3 @@ main()
     );
     process.exitCode = 1;
   })
-  .finally(() => client?.$disconnect());
