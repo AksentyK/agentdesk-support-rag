@@ -19,6 +19,7 @@ import {
 } from "../src/lib/router";
 import { dataset, splitCases } from "../src/lib/dataset";
 import { bm25Rank, hybridRank, offlineRetrieve } from "../src/lib/retrieval";
+import { indexIncrementally } from "../src/lib/reindexing";
 import {
   passwordMatches,
   newSession,
@@ -150,6 +151,34 @@ test("offline Markdown retrieval uses genuine BM25 without a vector channel", as
 test("hybrid diagnostics expose intersection independently of fused results", async () => {
   const r = await offlineRetrieve("Что означает AD-413?", defaults());
   assert.deepEqual(r.overlapIds, []);
+});
+test("incremental neural indexing skips persisted vectors after a partial failure", async () => {
+  const chunks = ["a", "b", "c"].map((id) => ({ id, content: id }));
+  const saved = new Map<string, string>();
+  let requests = 0;
+  let failPersistB = true;
+  const run = () =>
+    indexIncrementally({
+      next: async () => chunks.find((chunk) => !saved.has(chunk.id)) || null,
+      embed: async (chunk) => {
+        requests++;
+        return `vector:${chunk.content}`;
+      },
+      persist: async (chunk, vector) => {
+        if (chunk.id === "b" && failPersistB) {
+          failPersistB = false;
+          throw new Error("simulated connection loss before persistence");
+        }
+        saved.set(chunk.id, vector);
+      },
+    });
+  await assert.rejects(run(), /simulated connection loss/);
+  assert.deepEqual([...saved.keys()], ["a"]);
+  const resumed = await run();
+  assert.deepEqual([...saved.keys()], ["a", "b", "c"]);
+  assert.equal(resumed.saved, 2);
+  assert.equal(resumed.requests, 2);
+  assert.equal(requests, 4); // only the unpersisted chunk may be requested again
 });
 test("model context is the exact serialized source payload used by the prompt", async () => {
   const r = await offlineRetrieve("AD-413", defaults());
