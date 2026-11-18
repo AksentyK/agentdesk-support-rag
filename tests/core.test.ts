@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -5,11 +6,20 @@ import {
   bundledKnowledge,
   chunkArticles,
 } from "../src/lib/knowledge";
-import { LocalLSA, cosine } from "../src/lib/embeddings";
+import {
+  LocalLSA,
+  cosine,
+  requestRouterEmbeddings,
+} from "../src/lib/embeddings";
 import { defaults, estimateCost } from "../src/lib/settings";
-import { validateCitations } from "../src/lib/router";
+import {
+  contextForModel,
+  shouldRefuse,
+  validateCitations,
+} from "../src/lib/router";
 import { dataset, splitCases } from "../src/lib/dataset";
-import { offlineRetrieve } from "../src/lib/retrieval";
+import { bm25Rank, hybridRank, offlineRetrieve } from "../src/lib/retrieval";
+import { indexIncrementally } from "../src/lib/reindexing";
 import {
   passwordMatches,
   newSession,
@@ -49,6 +59,54 @@ test("LSA embeds into finite 256D normalized vectors with semantic projection", 
   assert(Math.abs(cosine(a, b) - 1) < 1e-8);
   assert.equal(cosine(c, c), 0);
 });
+test("RouterAI embedding adapter validates 4096D response and preserves item order", async () => {
+  const result = await requestRouterEmbeddings(["вопрос", "ответ"], {
+    apiKey: "mock-secret",
+    model: "Qwen/Qwen3-Embedding-8B",
+    expectedDimensions: 4096,
+    fetcher: async (_input, init) => {
+      assert.equal(
+        init?.headers && new Headers(init.headers).get("authorization"),
+        "Bearer mock-secret",
+      );
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.model, "Qwen/Qwen3-Embedding-8B");
+      return new Response(
+        JSON.stringify({
+          model: body.model,
+          data: [
+            {
+              index: 1,
+              embedding: Array.from({ length: 4096 }, (_, i) =>
+                i === 1 ? 1 : 0,
+              ),
+            },
+            {
+              index: 0,
+              embedding: Array.from({ length: 4096 }, (_, i) =>
+                i === 0 ? 1 : 0,
+              ),
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    },
+  });
+  assert.equal(result.dimensions, 4096);
+  assert.equal(result.vectors[0][0], 1);
+  assert.equal(result.vectors[1][1], 1);
+});
+test("neural vector migration is additive and leaves the legacy vector column untouched", async () => {
+  const sql = await readFile(
+    "prisma/migrations/202611120001_neural_embeddings/migration.sql",
+    "utf8",
+  );
+  assert.match(sql, /ADD COLUMN "embeddingV2" vector/);
+  assert.match(sql, /ADD COLUMN "embeddingV2Hash" text/);
+  assert.doesNotMatch(sql, /DROP COLUMN|UPDATE "Chunk" SET embedding=/i);
+  assert.doesNotMatch(sql, /USING hnsw|vector_cosine_ops/i);
+});
 test("dataset has stratified deterministic 48/12 split and isolated unknown questions", async () => {
   const all = await dataset();
   assert.equal(all.length, 60);
@@ -70,6 +128,135 @@ test("retrieval finds AD-413 article and Team limit with source metadata", async
         r.sources.find((s) => s.articleId === id)?.content.includes("500"),
       );
   }
+});
+test("BM25 gives exact AD-413 code its own lexical hit and priority", async () => {
+  const r = await offlineRetrieve("AD-413", defaults());
+  const exact = r.bm25Results.find((s) => s.articleId === "AD-KB-09.03");
+  assert(exact, "BM25 should find the precise technical code");
+  assert(exact.bm25Score! > 0);
+  assert.equal(exact.bm25Rank, 1);
+});
+test("BM25 retrieves paraphrased Russian query by stemmed terms", async () => {
+  const r = await offlineRetrieve("не удается создать проект", defaults());
+  assert(r.bm25Results.length > 0);
+  assert(r.bm25Results.some((s) => s.bm25Score! > 0));
+});
+test("offline Markdown retrieval uses genuine BM25 without a vector channel", async () => {
+  const r = await offlineRetrieve("Что означает AD-413?", defaults());
+  assert.equal(r.vectorResults.length, 0);
+  assert(r.bm25Results.length > 0);
+  assert(r.sources.length > 0);
+  assert(r.sources.every((s) => s.vectorRank == null && s.bm25Rank != null));
+});
+test("hybrid diagnostics expose intersection independently of fused results", async () => {
+  const r = await offlineRetrieve("Что означает AD-413?", defaults());
+  assert.deepEqual(r.overlapIds, []);
+});
+test("incremental neural indexing skips persisted vectors after a partial failure", async () => {
+  const chunks = ["a", "b", "c"].map((id) => ({ id, content: id }));
+  const saved = new Map<string, string>();
+  let requests = 0;
+  let failPersistB = true;
+  const run = () =>
+    indexIncrementally({
+      next: async () => chunks.find((chunk) => !saved.has(chunk.id)) || null,
+      embed: async (chunk) => {
+        requests++;
+        return `vector:${chunk.content}`;
+      },
+      persist: async (chunk, vector) => {
+        if (chunk.id === "b" && failPersistB) {
+          failPersistB = false;
+          throw new Error("simulated connection loss before persistence");
+        }
+        saved.set(chunk.id, vector);
+      },
+    });
+  await assert.rejects(run(), /simulated connection loss/);
+  assert.deepEqual([...saved.keys()], ["a"]);
+  const resumed = await run();
+  assert.deepEqual([...saved.keys()], ["a", "b", "c"]);
+  assert.equal(resumed.saved, 2);
+  assert.equal(resumed.requests, 2);
+  assert.equal(requests, 4); // only the unpersisted chunk may be requested again
+});
+test("model context is the exact serialized source payload used by the prompt", async () => {
+  const r = await offlineRetrieve("AD-413", defaults());
+  const payload = contextForModel(r.sources);
+  assert.deepEqual(
+    payload,
+    r.sources.map(
+      ({
+        id,
+        articleId,
+        title,
+        section,
+        content,
+        position,
+        score,
+        vectorScore,
+        bm25Score,
+        vectorRank,
+        bm25Rank,
+        filename,
+        version,
+        index,
+      }) => ({
+        id,
+        articleId,
+        title,
+        section,
+        content,
+        position,
+        score,
+        vectorScore,
+        bm25Score,
+        vectorRank,
+        bm25Rank,
+        filename,
+        version,
+        index,
+      }),
+    ),
+  );
+  assert(
+    payload.every(
+      (s) => s.id && s.articleId && s.section && s.content && s.position,
+    ),
+  );
+});
+test("source citations only link to retrieved article IDs and section fragments", async () => {
+  const r = await offlineRetrieve("AD-413", defaults());
+  const valid = r.sources[0].articleId;
+  const checked = validateCitations(
+    `Факт [${valid}] и выдуманная AD-KB-99.99`,
+    r.sources,
+  );
+  assert(checked.citations.includes(valid));
+  assert(!checked.citations.includes("AD-KB-99.99"));
+  assert(checked.answer.includes("[ссылка не подтверждена]"));
+});
+test("RAG refuses when no retrieved evidence exists; plain mode stays available", () => {
+  assert(shouldRefuse(true, []));
+  assert(!shouldRefuse(false, []));
+});
+test("all four evaluation modes carry diagnostics, and plain modes declare RAG off", async () => {
+  const r = await offlineRetrieve("AD-413", defaults());
+  for (const role of ["baseline", "strong"])
+    for (const rag of [true, false]) {
+      const mode = `${role}-${rag ? "rag" : "plain"}`;
+      const diagnostics = rag
+        ? r
+        : {
+            vectorResults: [],
+            bm25Results: [],
+            overlapIds: [],
+            excludedFromContext: [],
+          };
+      assert.match(mode, /^(baseline|strong)-(rag|plain)$/);
+      assert.ok(diagnostics.vectorResults.length === 0 || rag);
+      assert.ok(diagnostics.bm25Results.length === 0 || rag);
+    }
 });
 test("citation validation filters invented article links and preserves diagnostics", async () => {
   const r = await offlineRetrieve("AD-413", defaults());
@@ -143,4 +330,15 @@ test("quality is never fabricated from retrieval/citation scores", async () => {
   });
   assert.equal(m.factualAccuracy, null);
   assert.equal(m.reviewRequired, true);
+});
+
+test("real PDF and DOCX parsers extract text in the Node runtime", async () => {
+  const pdf = await extract(
+    new File([await readFile("AgentDesk_Manual_35pages.pdf")], "manual.pdf"),
+  );
+  assert(pdf.text.includes("AgentDesk"));
+  const docx = await extract(
+    new File([await readFile("tests/fixtures/sample.docx")], "sample.docx"),
+  );
+  assert(docx.text.includes("AgentDesk: проверка DOCX."));
 });

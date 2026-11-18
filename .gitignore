@@ -12,3 +12,9 @@ playwright-report/
 *.log
 *.dump
 .data/
+
+work/
+src/app/.well-known/workflow/
+.workflow-data/
+.vercel/
+/.swc

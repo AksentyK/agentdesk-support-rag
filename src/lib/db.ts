@@ -9,7 +9,13 @@ export function db() {
       "База данных не подключена. Задайте DATABASE_URL и выполните миграции.",
     );
   return (globalDb.prisma ??= new PrismaClient({
-    adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
+    adapter: new PrismaPg({
+      connectionString: process.env.DATABASE_URL,
+      max: 3,
+      connectionTimeoutMillis: 15000,
+      idleTimeoutMillis: 10000,
+      allowExitOnIdle: true,
+    }),
     log: [],
   }));
 }

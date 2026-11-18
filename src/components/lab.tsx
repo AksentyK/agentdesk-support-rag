@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   BarChart,
   Bar,
@@ -9,13 +9,15 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
-import type { Answer, Settings, Source } from "@/lib/types";
+import type { Answer, ContextFragment, Settings, Source } from "@/lib/types";
 type Doc = {
   id: string;
   name: string;
   versions: { id: string; checksum: string; _count: { chunks: number } }[];
 };
 type Article = { articleId: string; title: string; content: string };
+type ChatSessionSummary = { id: string; preview: string; createdAt: string };
+type SavedChatMessage = { role: string; text: string; result?: Answer | null };
 type Result = {
   id: string;
   caseId: string;
@@ -51,13 +53,17 @@ async function api<T = Record<string, unknown>>(
   const response = await fetch("/api/" + path, {
     method: method || (body ? "POST" : "GET"),
     headers:
-      body instanceof FormData
+      body instanceof FormData || body instanceof Blob
         ? {}
         : body
           ? { "Content-Type": "application/json" }
           : {},
     body:
-      body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+      body instanceof FormData || body instanceof Blob
+        ? body
+        : body
+          ? JSON.stringify(body)
+          : undefined,
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Операция не выполнена");
@@ -65,22 +71,107 @@ async function api<T = Record<string, unknown>>(
 }
 const money = (value: number | null | undefined, currency = "RUB") =>
   value == null ? "не рассчитано" : `${value.toFixed(5)} ${currency} (оценка)`;
-function Sources({ sources }: { sources: Source[] }) {
+function Sources({
+  sources,
+  idPrefix = "src",
+  showRrfScore = false,
+}: {
+  sources: (Source | ContextFragment)[];
+  idPrefix?: string;
+  showRrfScore?: boolean;
+}) {
   return (
     <>
       {sources.map((s) => (
-        <details className="source" key={s.id}>
+        <details
+          className="source"
+          key={s.id}
+          id={`${idPrefix}-source-${s.id}`}
+        >
           <summary>
-            <strong>{s.articleId}</strong> · {Math.round(s.score * 100)}%<br />
+            <strong>{s.articleId}</strong> · позиция {s.position ?? "—"}
+            {"vectorScore" in s &&
+              s.vectorScore != null &&
+              ` · similarity ${s.vectorScore.toFixed(3)}`}
+            {"bm25Score" in s &&
+              s.bm25Score != null &&
+              ` · BM25 ${s.bm25Score.toFixed(3)}`}
+            {showRrfScore &&
+              typeof s.score === "number" &&
+              ` · RRF ${s.score.toFixed(5)}`}
+            <br />
             {s.title}
           </summary>
           <p>{s.content}</p>
           <small>
-            {s.filename} · версия {s.version.slice(0, 12)} · чанк {s.index}
+            {s.filename || "Документ"} · {s.section} · версия{" "}
+            {s.version?.slice(0, 12) || "legacy"} · чанк {s.index ?? "—"} · ID{" "}
+            {s.id}
           </small>
         </details>
       ))}
     </>
+  );
+}
+function Markdown({
+  text,
+  sources,
+  idPrefix,
+  onSource,
+}: {
+  text: string;
+  sources: Source[];
+  idPrefix: string;
+  onSource: (source: Source) => void;
+}) {
+  const allowed = new Set(sources.map((s) => s.articleId));
+  const inline = (line: string, key: string) => {
+    const parts = line.split(
+      /(\*\*[^*]+\*\*|(?:AD-KB-\d{2}\.\d{2}|DOC-[a-f0-9]{12}))/g,
+    );
+    return parts.map((part, i) => {
+      if (/^\*\*[^*]+\*\*$/.test(part))
+        return <strong key={i}>{part.slice(2, -2)}</strong>;
+      if (allowed.has(part)) {
+        const source = sources.find((s) => s.articleId === part)!;
+        return (
+          <a
+            key={i}
+            href="#knowledge-source"
+            onClick={(event) => {
+              event.preventDefault();
+              onSource(source);
+            }}
+          >
+            {part}
+          </a>
+        );
+      }
+      return <span key={i}>{part}</span>;
+    });
+  };
+  const lines = text.split("\n");
+  return (
+    <div className="markdown">
+      {lines.map((line, i) => {
+        const heading = /^(#{1,3})\s+(.*)$/.exec(line);
+        if (heading)
+          return heading[1].length === 1 ? (
+            <h3 key={i}>{inline(heading[2], `${i}`)}</h3>
+          ) : (
+            <h4 key={i}>{inline(heading[2], `${i}`)}</h4>
+          );
+        if (/^\s*[-*]\s+/.test(line))
+          return (
+            <div key={i}>
+              • {inline(line.replace(/^\s*[-*]\s+/, ""), `${i}`)}
+            </div>
+          );
+        if (/^\s*\d+[.)]\s+/.test(line))
+          return <div key={i}>{inline(line.trim(), `${i}`)}</div>;
+        return line ? <p key={i}>{inline(line, `${i}`)}</p> : <br key={i} />;
+      })}
+    </div>
   );
 }
 export default function Lab() {
@@ -96,18 +187,31 @@ export default function Lab() {
   const [docs, setDocs] = useState<Doc[]>([]),
     [articles, setArticles] = useState<Article[]>([]),
     [selected, setSelected] = useState<Article | null>(null),
+    [activeSource, setActiveSource] = useState<Source | null>(null),
     [query, setQuery] = useState("");
   const [role, setRole] = useState<"baseline" | "strong">("baseline"),
     [rag, setRag] = useState(true),
     [offline, setOffline] = useState(true),
     [question, setQuestion] = useState(""),
     [sources, setSources] = useState<Source[]>([]),
+    [searchResult, setSearchResult] = useState<{
+      sources: Source[];
+      vectorResults: Source[];
+      bm25Results: Source[];
+      overlapIds: string[];
+      offline?: boolean;
+    } | null>(null),
     [diagnostic, setDiagnostic] = useState<Answer | null>(null),
     [sessionId, setSessionId] = useState<string | undefined>();
   const [messages, setMessages] = useState<
       { role: string; text: string; result?: Answer }[]
     >([]),
     [models, setModels] = useState<string[]>([]);
+  const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [ragDiagnosticTab, setRagDiagnosticTab] = useState<
+    "vector" | "bm25" | "context"
+  >("context");
   const [runs, setRuns] = useState<Run[]>([]),
     [run, setRun] = useState<Run | null>(null),
     [split, setSplit] = useState("dev"),
@@ -147,10 +251,43 @@ export default function Lab() {
       try {
         setDocs((await api<{ documents: Doc[] }>("documents")).documents);
         setRuns((await api<{ runs: Run[] }>("evaluation/runs")).runs);
+        await refreshChatSessions();
       } catch (e) {
         setError((e as Error).message);
       }
     }
+  }
+  async function refreshChatSessions() {
+    const data = await api<{ sessions: ChatSessionSummary[] }>("chat/sessions");
+    setChatSessions(data.sessions);
+  }
+  async function openChatSession(id: string) {
+    const saved = await api<{ id: string; messages: SavedChatMessage[] }>(
+      `chat/sessions/${id}`,
+    );
+    const restored = saved.messages.map((message) => ({
+      role: message.role,
+      text: message.text,
+      ...(message.result && message.result.retrieval
+        ? { result: message.result }
+        : {}),
+    }));
+    setSessionId(saved.id);
+    setMessages(restored);
+    const latestAnswer = [...restored]
+      .reverse()
+      .find((message) => message.result);
+    setDiagnostic(latestAnswer?.result || null);
+    setSources(latestAnswer?.result?.sources || []);
+    setActiveSource(null);
+    setRagDiagnosticTab("vector");
+    if (latestAnswer?.result?.mode.startsWith("strong-")) setRole("strong");
+    else if (latestAnswer?.result?.mode.startsWith("baseline-"))
+      setRole("baseline");
+    if (latestAnswer?.result?.mode.endsWith("-rag")) setRag(true);
+    else if (latestAnswer?.result?.mode.endsWith("-plain")) setRag(false);
+    setMobile("chat");
+    setTab("chat");
   }
   useEffect(() => {
     api<{ authenticated: boolean }>("auth/status")
@@ -169,6 +306,12 @@ export default function Lab() {
     }, 1800);
     return () => clearInterval(timer);
   }, [run?.id, run?.status]);
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      block: "end",
+      behavior: "smooth",
+    });
+  }, [messages.length]);
   async function send(e: FormEvent) {
     e.preventDefault();
     if (!question.trim()) return;
@@ -180,6 +323,7 @@ export default function Lab() {
         rag,
         sessionId,
       });
+      setRagDiagnosticTab("vector");
       setSessionId(result.sessionId);
       setMessages((m) => [
         ...m,
@@ -189,14 +333,23 @@ export default function Lab() {
       setSources(result.sources);
       setDiagnostic(result);
       setQuestion("");
+      await refreshChatSessions();
     });
   }
-  async function search() {
+  async function search(searchQuestion = question) {
+    if (!searchQuestion.trim()) return;
     await perform(async () => {
-      const result = await api<{ sources: Source[] }>("search", {
-        question,
+      const result = await api<{
+        sources: Source[];
+        vectorResults: Source[];
+        bm25Results: Source[];
+        overlapIds: string[];
+        offline?: boolean;
+      }>("search", {
+        question: searchQuestion,
         offline,
       });
+      setSearchResult({ ...result, offline });
       setSources(result.sources);
       setMobile("diagnostics");
     });
@@ -367,7 +520,8 @@ export default function Lab() {
       </section>
       <nav className="tabs" aria-label="Разделы">
         {[
-          ["chat", "Диалог и поиск"],
+          ["chat", "Диалог"],
+          ["search", "Поиск"],
           ["knowledge", "База знаний"],
           ["evaluation", "Сравнение моделей"],
           ["settings", "Настройки"],
@@ -392,8 +546,8 @@ export default function Lab() {
       {!database && (
         <div className="notice" style={{ marginBottom: 18 }}>
           База данных не подключена. Доступны встроенные статьи и автономный
-          LSA-поиск. Чат, импорт и сохранение экспериментов требуют PostgreSQL с
-          pgvector.
+          BM25-поиск по Markdown. Чат, импорт и сохранение экспериментов требуют
+          PostgreSQL с pgvector.
         </div>
       )}
       {tab === "chat" && (
@@ -442,12 +596,20 @@ export default function Lab() {
                     <div className="row">
                       <button
                         disabled={busy}
-                        onClick={() =>
+                        onClick={() => {
+                          if (
+                            !window.confirm(
+                              "Переиндексация отправит в RouterAI запросы для ещё не проиндексированных фрагментов и может быть платной. Для 35 новых фрагментов потребуется до 3 запросов. Продолжить?",
+                            )
+                          )
+                            return;
                           void perform(async () => {
-                            await api("documents/" + d.id + "/reindex", {});
+                            await api("documents/" + d.id + "/reindex", {
+                              confirmPaid: true,
+                            });
                             await refreshDocs();
-                          })
-                        }
+                          });
+                        }}
                       >
                         ↻ Переиндексировать
                       </button>
@@ -494,9 +656,29 @@ export default function Lab() {
                       const file = e.target.files?.[0];
                       if (file)
                         void perform(async () => {
-                          const form = new FormData();
-                          form.set("file", file);
-                          await api("documents", form);
+                          if (file.size > 20 * 1024 * 1024 || !file.size)
+                            throw new Error(
+                              "Размер файла должен быть от 1 байта до 20 МБ.",
+                            );
+                          const upload = await api<{ id: string }>(
+                            "documents/uploads",
+                            { name: file.name, size: file.size },
+                          );
+                          const partSize = 3 * 1024 * 1024;
+                          for (
+                            let offset = 0, index = 0;
+                            offset < file.size;
+                            offset += partSize, index++
+                          )
+                            await api(
+                              `documents/uploads/${upload.id}/${index}`,
+                              file.slice(offset, offset + partSize),
+                              "PUT",
+                            );
+                          await api(
+                            `documents/uploads/${upload.id}/complete`,
+                            {},
+                          );
                           await refreshDocs();
                         });
                       e.target.value = "";
@@ -523,10 +705,28 @@ export default function Lab() {
                     setSessionId(undefined);
                     setDiagnostic(null);
                     setSources([]);
+                    setActiveSource(null);
+                    setRagDiagnosticTab("vector");
                   }}
                 >
                   Новая сессия
                 </button>
+                <select
+                  aria-label="История чатов"
+                  style={{ maxWidth: 220 }}
+                  value={sessionId || ""}
+                  onChange={(event) => {
+                    const id = event.target.value;
+                    if (id) void perform(() => openChatSession(id));
+                  }}
+                >
+                  <option value="">История чатов</option>
+                  {chatSessions.map((session) => (
+                    <option key={session.id} value={session.id}>
+                      {session.preview.slice(0, 72)}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div
                 className="padded row"
@@ -574,11 +774,33 @@ export default function Lab() {
                   </div>
                 </div>
               ) : (
-                <div className="messages">
+                <div className="messages" data-testid="chat-messages">
                   {messages.map((m, i) => (
                     <article key={i} className={"message " + m.role}>
                       <small>{m.role === "user" ? "Вы" : "AI-оператор"}</small>
-                      <p>{m.text}</p>
+                      {m.result ? (
+                        <Markdown
+                          text={m.text}
+                          sources={m.result.sources}
+                          idPrefix={`message-${i}`}
+                          onSource={(source) => {
+                            const article = articles.find(
+                              (a) => a.articleId === source.articleId,
+                            );
+                            if (article) {
+                              setSelected(article);
+                              setActiveSource(source);
+                              setTab("knowledge");
+                              setMobile("knowledge");
+                            } else {
+                              setSources([source]);
+                              setMobile("diagnostics");
+                            }
+                          }}
+                        />
+                      ) : (
+                        <p>{m.text}</p>
+                      )}
                       {m.result && (
                         <>
                           <span className="badge">
@@ -606,10 +828,164 @@ export default function Lab() {
                               Диагностика ↗
                             </button>
                           </div>
+                          {m.result.invalidCitations.length > 0 && (
+                            <div className="notice">
+                              Ответ содержит неподтверждённые ссылки; они
+                              скрыты.
+                            </div>
+                          )}
+                          {rag &&
+                            m.result.mode.endsWith("-rag") &&
+                            !m.result.citations.length &&
+                            m.result.status === "ok" && (
+                              <div className="notice">
+                                В ответе нет ссылок на подтверждающие фрагменты.
+                                Проверьте сведения перед использованием.
+                              </div>
+                            )}
+                          <details
+                            className="source rag-diagnostics"
+                            data-testid="rag-diagnostics"
+                          >
+                            <summary>
+                              <strong>Диагностика RAG</strong> · Векторный поиск
+                              ({m.result.retrieval.vectorResults.length}) · BM25
+                              ({m.result.retrieval.bm25Results.length}) ·
+                              Контекст LLM ({m.result.llmContext.length})
+                            </summary>
+                            <div
+                              className="row rag-diagnostic-tabs"
+                              role="tablist"
+                              aria-label="Вкладки диагностики RAG"
+                              style={{ margin: "10px 0" }}
+                            >
+                              {(
+                                [
+                                  ["vector", "Векторный поиск"],
+                                  ["bm25", "BM25"],
+                                  ["context", "Контекст LLM"],
+                                ] as const
+                              ).map(([key, label]) => (
+                                <button
+                                  key={key}
+                                  type="button"
+                                  role="tab"
+                                  id={`rag-${i}-${key}-tab`}
+                                  aria-controls={`rag-${i}-panel`}
+                                  onClick={() => setRagDiagnosticTab(key)}
+                                  aria-selected={ragDiagnosticTab === key}
+                                  aria-pressed={ragDiagnosticTab === key}
+                                  data-testid={`rag-tab-${key}`}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                            {m.result.retrieval.overlapIds.length > 0 && (
+                              <p className="muted">
+                                Найдены обоими методами:{" "}
+                                {m.result.retrieval.overlapIds
+                                  .map(
+                                    (id) =>
+                                      m.result!.sources.find((s) => s.id === id)
+                                        ?.articleId || id,
+                                  )
+                                  .join(", ")}
+                              </p>
+                            )}
+                            <div
+                              className="rag-diagnostic-grid"
+                              data-testid="rag-diagnostic-panel"
+                            >
+                              {m.result!.retrieval.overlapIds.length > 0 && (
+                                <p className="muted rag-overlap">
+                                  Найдены обоими методами:{" "}
+                                  {m
+                                    .result!.retrieval.overlapIds.map(
+                                      (id) =>
+                                        m.result!.sources.find(
+                                          (s) => s.id === id,
+                                        )?.articleId || id,
+                                    )
+                                    .join(", ")}
+                                </p>
+                              )}
+                              {(["vector", "bm25", "context"] as const).map(
+                                (key) => (
+                                  <section
+                                    key={key}
+                                    className={`rag-column ${ragDiagnosticTab === key ? "selected" : ""}`}
+                                  >
+                                    <h4>
+                                      {key === "vector"
+                                        ? `Векторный поиск (${m.result!.retrieval.vectorResults.length})`
+                                        : key === "bm25"
+                                          ? `BM25 (${m.result!.retrieval.bm25Results.length})`
+                                          : `Контекст LLM (${m.result!.llmContext.length})`}
+                                    </h4>
+                                    {key === "context" && (
+                                      <p className="muted">
+                                        Показаны только фрагменты из
+                                        фактического запроса модели.
+                                      </p>
+                                    )}
+                                    {m.result!.mode.endsWith("-plain") ? (
+                                      <p data-testid="rag-disabled">
+                                        Поиск по базе знаний отключён.
+                                      </p>
+                                    ) : (
+                                      <Sources
+                                        idPrefix={`message-${i}-${key}`}
+                                        showRrfScore={key === "context"}
+                                        sources={
+                                          key === "vector"
+                                            ? m.result!.retrieval.vectorResults
+                                            : key === "bm25"
+                                              ? m.result!.retrieval.bm25Results
+                                              : m.result!.llmContext
+                                        }
+                                      />
+                                    )}
+                                    {key === "context" &&
+                                      (m.result!.retrieval.excludedFromContext
+                                        ?.length ?? 0) > 0 && (
+                                        <details className="source">
+                                          <summary>
+                                            Исключено из контекста (
+                                            {
+                                              m.result!.retrieval
+                                                .excludedFromContext!.length
+                                            }
+                                            )
+                                          </summary>
+                                          {m.result!.retrieval.excludedFromContext!.map(
+                                            (item) => (
+                                              <p key={item.id}>
+                                                <strong>
+                                                  {item.articleId}
+                                                </strong>{" "}
+                                                · {item.title} ·{" "}
+                                                {item.reason === "outside_top_k"
+                                                  ? "за пределами top-K"
+                                                  : item.reason ===
+                                                      "outside_candidate_limit"
+                                                    ? "за пределами лимита кандидатов метода"
+                                                    : "ниже порога релевантности"}
+                                              </p>
+                                            ),
+                                          )}
+                                        </details>
+                                      )}
+                                  </section>
+                                ),
+                              )}
+                            </div>
+                          </details>
                         </>
                       )}
                     </article>
                   ))}
+                  <div ref={messagesEndRef} aria-hidden="true" />
                 </div>
               )}
               <form className="composer" onSubmit={send}>
@@ -720,6 +1096,73 @@ export default function Lab() {
           </div>
         </>
       )}
+      {tab === "search" && (
+        <section className="panel padded" aria-label="Поиск по базе знаний">
+          <h2>Поиск по базе знаний</h2>
+          <p className="muted">
+            Сравните результаты векторного поиска, BM25 и объединённую выдачу.
+          </p>
+          <form
+            className="row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void search(query);
+            }}
+          >
+            <input
+              aria-label="Запрос для поиска"
+              placeholder="Введите вопрос или фразу для поиска…"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              style={{ flex: 1, minWidth: 220 }}
+            />
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={offline}
+                onChange={(event) => setOffline(event.target.checked)}
+              />
+              Автономный поиск по Markdown
+            </label>
+            <button className="primary" disabled={busy || query.trim().length < 2}>
+              Найти
+            </button>
+          </form>
+          {searchResult && (
+            <div className="stack" style={{ marginTop: 24 }}>
+              {searchResult.offline && (
+                <div className="notice">Векторный поиск отключён в автономном режиме.</div>
+              )}
+              <section aria-label="Объединённая выдача">
+                <h3>Объединённая выдача ({searchResult.sources.length})</h3>
+                {searchResult.sources.length ? (
+                  <Sources sources={searchResult.sources} showRrfScore />
+                ) : <p className="muted">Фрагменты не найдены.</p>}
+              </section>
+              <div className="search-columns">
+                <section aria-label="Векторный поиск">
+                  <h3>Векторный поиск ({searchResult.vectorResults.length})</h3>
+                  {searchResult.vectorResults.length ? <Sources sources={searchResult.vectorResults} /> : <p className="muted">Нет результатов.</p>}
+                </section>
+                <section aria-label="BM25">
+                  <h3>BM25 ({searchResult.bm25Results.length})</h3>
+                  {searchResult.bm25Results.length ? <Sources sources={searchResult.bm25Results} /> : <p className="muted">Нет результатов.</p>}
+                </section>
+              </div>
+              {!searchResult.offline && (
+                <p className="muted">
+                  Найдены обоими методами: {searchResult.overlapIds.length
+                    ? searchResult.overlapIds.map((id) => {
+                        const source = [...searchResult.vectorResults, ...searchResult.bm25Results].find((item) => item.id === id);
+                        return source?.articleId || id;
+                      }).join(", ")
+                    : "нет пересечения"}
+                </p>
+              )}
+            </div>
+          )}
+        </section>
+      )}
       {tab === "knowledge" && (
         <div className="articles">
           <div className="panel">
@@ -761,7 +1204,20 @@ export default function Lab() {
           <article className="panel padded">
             <span className="badge">Встроенный источник · версия 1.0</span>
             <h2 style={{ marginTop: 18 }}>{selected?.title}</h2>
-            <div className="articletext">{selected?.content}</div>
+            <div className="articletext" id="knowledge-source">
+              {selected?.content}
+            </div>
+            {activeSource && activeSource.articleId === selected?.articleId && (
+              <div className="source-highlight" data-testid="source-highlight">
+                <small>
+                  Использованный фрагмент · {activeSource.section} · ID{" "}
+                  {activeSource.id}
+                </small>
+                <p>
+                  <mark>{activeSource.content}</mark>
+                </p>
+              </div>
+            )}
           </article>
         </div>
       )}

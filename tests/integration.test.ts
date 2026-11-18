@@ -7,6 +7,16 @@ import { corpus, importDocument, retrieve } from "../src/lib/retrieval";
 import { defaults } from "../src/lib/settings";
 import { answer, catalog } from "../src/lib/router";
 import { createRun, executeRun } from "../src/lib/evaluation";
+import {
+  executeWorkflowBatch,
+  reconcileStaleRuns,
+} from "../src/lib/evaluation-batches";
+import {
+  beginUpload,
+  putUploadPart,
+  finishUpload,
+  UPLOAD_PART_SIZE,
+} from "../src/lib/uploads";
 import { publicError } from "../src/lib/errors";
 const enabled = Boolean(process.env.DATABASE_URL);
 after(async () => {
@@ -34,6 +44,11 @@ test(
       assert(
         (await retrieve(q, defaults())).sources.some((s) => s.articleId === id),
       );
+    const ad413 = await retrieve("Что означает AD-413?", defaults());
+    assert(ad413.diagnostics.vectorResults.length > 0);
+    assert(ad413.diagnostics.bm25Results.length > 0);
+    assert(ad413.diagnostics.overlapIds.length > 0);
+    assert(ad413.sources.length <= defaults().topK);
     const run = await createRun(
       "integration",
       "dev",
@@ -54,6 +69,39 @@ test(
     assert.equal(completed.completed, 48);
     assert.equal(completed.results.length, 48);
     assert(completed.results.every((r) => r.status === "ok"));
+  },
+);
+test(
+  "real PostgreSQL: saved chat diagnostics restore without rerunning retrieval",
+  { skip: !enabled },
+  async () => {
+    const owner = `diagnostics-${crypto.randomUUID()}`;
+    const session = await db().chatSession.create({ data: { owner } });
+    const savedDiagnostics = {
+      answer: "Сохранённый ответ",
+      retrieval: {
+        vectorResults: [{ id: "vector-result" }],
+        bm25Results: [],
+        overlapIds: [],
+      },
+      llmContext: [{ id: "actual-context" }],
+    };
+    try {
+      await db().message.create({
+        data: {
+          sessionId: session.id,
+          role: "assistant",
+          content: savedDiagnostics.answer,
+          diagnostics: savedDiagnostics,
+        },
+      });
+      const restored = await db().message.findFirstOrThrow({
+        where: { sessionId: session.id, role: "assistant" },
+      });
+      assert.deepEqual(restored.diagnostics, savedDiagnostics);
+    } finally {
+      await db().chatSession.delete({ where: { id: session.id } });
+    }
   },
 );
 test(
@@ -156,6 +204,39 @@ test(
       });
       assert.equal(refusal.status, "refused-no-source");
       assert.equal(calls, before);
+      upstreamStatus = 200;
+      const previousExecutor = process.env.EVALUATION_EXECUTOR;
+      process.env.EVALUATION_EXECUTOR = "workflow";
+      try {
+        const run = await createRun("workflow-mock", "all", "models", s, 240);
+        const initial = calls;
+        assert.equal(await executeWorkflowBatch(run.id, 0), true);
+        assert.equal(calls, initial + 2);
+        assert.equal(await executeWorkflowBatch(run.id, 0), true);
+        assert.equal(
+          calls,
+          initial + 2,
+          "duplicate batch must not repeat AI requests",
+        );
+        for (
+          let batch = 1;
+          await executeWorkflowBatch(run.id, batch);
+          batch++
+        ) {}
+        const completed = await db().evaluationRun.findUniqueOrThrow({
+          where: { id: run.id },
+          include: { results: true },
+        });
+        assert.equal(completed.status, "completed");
+        assert.equal(completed.completed, 240);
+        assert.equal(completed.results.length, 240);
+        assert.equal(calls, initial + 240);
+        assert.equal(await executeWorkflowBatch(run.id, 120), false);
+      } finally {
+        if (previousExecutor === undefined)
+          delete process.env.EVALUATION_EXECUTOR;
+        else process.env.EVALUATION_EXECUTOR = previousExecutor;
+      }
     } finally {
       for (const [key, value] of [
         ["ROUTERAI_API_KEY", saved.key],
@@ -167,5 +248,168 @@ test(
       }
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  },
+);
+
+test(
+  "workflow cancellation, uncertain batches and stale leases never automatically resend work",
+  { skip: !enabled },
+  async () => {
+    const previousExecutor = process.env.EVALUATION_EXECUTOR;
+    process.env.EVALUATION_EXECUTOR = "workflow";
+    try {
+      const run = await createRun(
+        "workflow-recovery",
+        "dev",
+        "retrieval",
+        defaults(),
+        0,
+      );
+      await db().evaluationRun.update({
+        where: { id: run.id },
+        data: {
+          status: "running",
+          leaseToken: "uncertain",
+          leaseExpiresAt: new Date(Date.now() + 360000),
+        },
+      });
+      await assert.rejects(executeWorkflowBatch(run.id, 0), /уже исполняется/);
+      assert.equal(
+        await db().evaluationResult.count({ where: { runId: run.id } }),
+        0,
+      );
+      await db().evaluationRun.update({
+        where: { id: run.id },
+        data: { leaseExpiresAt: new Date(Date.now() - 1000) },
+      });
+      await reconcileStaleRuns();
+      assert.equal(await executeWorkflowBatch(run.id, 0), false);
+      assert.equal(
+        (await db().evaluationRun.findUniqueOrThrow({ where: { id: run.id } }))
+          .status,
+        "interrupted",
+      );
+      const retry = await createRun(
+        "workflow-recovery",
+        "dev",
+        "retrieval",
+        defaults(),
+        0,
+        run.id,
+      );
+      await executeWorkflowBatch(retry.id, 0);
+      await db().evaluationRun.update({
+        where: { id: retry.id },
+        data: { cancelled: true },
+      });
+      assert.equal(await executeWorkflowBatch(retry.id, 1), false);
+      const cancelled = await db().evaluationRun.findUniqueOrThrow({
+        where: { id: retry.id },
+      });
+      assert.equal(cancelled.status, "cancelled");
+      assert.equal(cancelled.completed, 2);
+      const remaining = await createRun(
+        "workflow-recovery",
+        "dev",
+        "retrieval",
+        defaults(),
+        0,
+        retry.id,
+      );
+      assert.equal(
+        remaining.total,
+        46,
+        "explicit retry skips the two saved successful results",
+      );
+      for (
+        let batch = 0;
+        await executeWorkflowBatch(remaining.id, batch);
+        batch++
+      ) {}
+      assert.equal(
+        (
+          await db().evaluationRun.findUniqueOrThrow({
+            where: { id: remaining.id },
+          })
+        ).completed,
+        46,
+      );
+    } finally {
+      if (previousExecutor === undefined)
+        delete process.env.EVALUATION_EXECUTOR;
+      else process.env.EVALUATION_EXECUTOR = previousExecutor;
+    }
+  },
+);
+test(
+  "multipart upload preserves a file larger than Vercel's request limit and enforces ownership, expiry and part sizes",
+  { skip: !enabled },
+  async () => {
+    const bytes = Buffer.from("文".repeat(1700000)); // 5.1 MB, within the extracted text limit.
+    const upload = await beginUpload("upload-test", {
+      name: "multipart-test.txt",
+      size: bytes.length,
+    });
+    try {
+      await assert.rejects(
+        putUploadPart(
+          upload.id,
+          "other-owner",
+          0,
+          bytes.subarray(0, UPLOAD_PART_SIZE),
+        ),
+        /не найдена/,
+      );
+      await assert.rejects(
+        putUploadPart(upload.id, "upload-test", 0, new Uint8Array(1)),
+        /размер/,
+      );
+      await assert.rejects(
+        finishUpload(upload.id, "upload-test"),
+        /не все части/,
+      );
+      for (
+        let offset = 0, i = 0;
+        offset < bytes.length;
+        offset += UPLOAD_PART_SIZE, i++
+      ) {
+        const part = bytes.subarray(offset, offset + UPLOAD_PART_SIZE);
+        await putUploadPart(upload.id, "upload-test", i, part);
+        await putUploadPart(upload.id, "upload-test", i, part); // idempotent part retry
+      }
+      const doc = await finishUpload(upload.id, "upload-test");
+      const version = await db().documentVersion.findFirstOrThrow({
+        where: { documentId: doc.id, active: true },
+      });
+      assert.equal(version.text, bytes.toString());
+      assert.equal(
+        await db().documentUploadPart.count({ where: { uploadId: upload.id } }),
+        0,
+      );
+    } finally {
+      const doc = await db().document.findUnique({
+        where: { name: "multipart-test.txt" },
+      });
+      if (doc) await db().document.delete({ where: { id: doc.id } });
+      await importDocument("AgentDesk_Knowledge.md", await bundledKnowledge());
+    }
+    const expired = await beginUpload("upload-test", {
+      name: "expired.txt",
+      size: 1,
+    });
+    await db().documentUpload.update({
+      where: { id: expired.id },
+      data: { expiresAt: new Date(0) },
+    });
+    await assert.rejects(
+      putUploadPart(expired.id, "upload-test", 0, new Uint8Array(1)),
+      /истекла/,
+    );
+    await assert.rejects(
+      beginUpload("upload-test", {
+        name: "huge.txt",
+        size: 20 * 1024 * 1024 + 1,
+      }),
+    );
   },
 );
