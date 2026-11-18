@@ -11,6 +11,8 @@ async function main() {
     throw new Error(
       "Set REINDEX_NEURAL_CONFIRM=YES after confirming target database and API spend.",
     );
+  if (!Number.isSafeInteger(Number(process.env.REINDEX_NEURAL_MAX_REQUESTS)) || Number(process.env.REINDEX_NEURAL_MAX_REQUESTS) < 1)
+    throw new Error("Set REINDEX_NEURAL_MAX_REQUESTS to the approved positive request limit.");
   const url = process.env.DIRECT_URL;
   if (!url) throw new Error("DIRECT_URL is required for neural reindexing.");
   const parsed = new URL(url);

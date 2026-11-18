@@ -340,6 +340,16 @@ async function reindexWithClient(client: Client) {
   const targetModel = process.env.EMBEDDING_MODEL || "Qwen/Qwen3-Embedding-8B";
   const targetDimensions = Number(process.env.EMBEDDING_DIMENSIONS || 4096);
   const revision = embeddingRevision(targetModel, targetDimensions);
+  const limit = Number(process.env.REINDEX_NEURAL_MAX_REQUESTS);
+  if (!Number.isSafeInteger(limit) || limit < 1)
+    throw new Error("Set REINDEX_NEURAL_MAX_REQUESTS to an approved positive request limit.");
+  const pending = await client.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM "Chunk" c JOIN "DocumentVersion" v ON v.id=c."versionId"
+     WHERE v.active=true AND (c."embeddingV2Hash" IS DISTINCT FROM $1 OR c."embeddingV2" IS NULL)`,
+    [revision],
+  );
+  if (Number(pending.rows[0]?.count || 0) > limit)
+    throw new Error("Pending chunks exceed REINDEX_NEURAL_MAX_REQUESTS; no embedding requests made.");
   const progress = await indexIncrementally({
     next: async () => {
       const next = await client.query<Row>(
